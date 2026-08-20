@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:; connect-src 'none'; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>Noor AI Studio</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="app" class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">N</div>
+        <div><strong>Noor AI Studio</strong><span>Local agent workspace</span></div>
+      </div>
+      <nav id="nav" class="nav"></nav>
+      <div class="sidebar-footer">
+        <div id="footer-health" class="health-line"><span class="status-dot"></span><span>Checking local services…</span></div>
+        <button class="ghost small" data-action="refresh-all">Refresh status</button>
+      </div>
+    </aside>
+    <main class="main-shell">
+      <header class="topbar">
+        <div><h1 id="page-title">Home</h1><p id="page-subtitle">Your local AI development control room</p></div>
+        <div id="top-actions" class="top-actions"></div>
+      </header>
+      <section id="content" class="content"></section>
+    </main>
+  </div>
+  <div id="toast-root" class="toast-root"></div>
+  <div id="modal-root"></div>
+  <script src="app.js"></script>
+</body>
+</html>

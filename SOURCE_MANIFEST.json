@@ -1,0 +1,193 @@
+{
+  "schemaVersion": 1,
+  "product": "Noor AI Studio",
+  "version": "0.2.4",
+  "generatedAt": "2026-08-20T17:00:11.859781Z",
+  "files": [
+    {
+      "path": ".gitignore",
+      "bytes": 42,
+      "sha256": "8167ce4c6556c58eb49f3b9bf46ac7f53c4375bb19605f5a74918d1cfadb6a30"
+    },
+    {
+      "path": "BUILD_WINDOWS_APP.cmd",
+      "bytes": 136,
+      "sha256": "06220255e928e6a18ac91ad728bb165ee6a31c652043224ef49e36cfe4d88972"
+    },
+    {
+      "path": "BUILD_WINDOWS_APP.vbs",
+      "bytes": 283,
+      "sha256": "8fc4391e9a806596c810d213d9a27a87afe581115f83ade4d32ba45271a61ac6"
+    },
+    {
+      "path": "README.md",
+      "bytes": 6433,
+      "sha256": "8048ef117eab2fc99f51848ad0a5f4aefce9556602b0847c0aed64e8bcb4f332"
+    },
+    {
+      "path": "README_FIRST.txt",
+      "bytes": 936,
+      "sha256": "f6db658ae36ac707042222dea3f393691035cf0e5ffb52cd57608e7585154455"
+    },
+    {
+      "path": "RELEASE_NOTES.md",
+      "bytes": 1750,
+      "sha256": "2c7537989d11b3ce7a48929fbee616b580fea665669f2c734590e452b35cbbea"
+    },
+    {
+      "path": "REPAIR_AND_START.cmd",
+      "bytes": 137,
+      "sha256": "a864e18fd333e24c1abc295790368e0e75b5a85721baf13fed1cff542587baa5"
+    },
+    {
+      "path": "REPAIR_AND_START.vbs",
+      "bytes": 284,
+      "sha256": "13ef0983cb2cc09fb883ea372b5f174e7efc3b03fdb767399dcb02411f7ec572"
+    },
+    {
+      "path": "START_NOOR_AI_STUDIO.cmd",
+      "bytes": 134,
+      "sha256": "740526da71e8a76f28796abb103db6449646a05ac18677294ae2de8f76e17898"
+    },
+    {
+      "path": "START_NOOR_AI_STUDIO.vbs",
+      "bytes": 281,
+      "sha256": "5ed0089ba86bc508aa442c76a9e94ae6e12b127a3b9a026a63fb3c24061ead50"
+    },
+    {
+      "path": "THIRD_PARTY_NOTICES.md",
+      "bytes": 714,
+      "sha256": "333f4123fdfa8f4dd0d2acaea4e01959f2efdabaeb03e6dbac9248ebb2ee7c7d"
+    },
+    {
+      "path": "VERIFICATION.md",
+      "bytes": 866,
+      "sha256": "81de918a77386255c28eec0fec63b046ff3f78501e2701ac5417ffe661eb974c"
+    },
+    {
+      "path": "assets/icon.ico",
+      "bytes": 51755,
+      "sha256": "2d8d5fd6403ad748ea2aac0cc2579a29ecb1cb57ddffc8a35cd01f9e72d177ee"
+    },
+    {
+      "path": "assets/icon.png",
+      "bytes": 18814,
+      "sha256": "49396ae4fbdde93776e2404f018242c1e3748390adac650077fd9b05b1bf3cc7"
+    },
+    {
+      "path": "docs/DEVIATIONS.md",
+      "bytes": 4970,
+      "sha256": "2eff210173b54211679108096f3610c6021cc57acf491ddcfe03837adec327e3"
+    },
+    {
+      "path": "docs/SHARED_CONTEXT.md",
+      "bytes": 2224,
+      "sha256": "14ba82f1e9620e6fb285af7bc49cecbae204d55a4499d7f23d84e15c49ba9eba"
+    },
+    {
+      "path": "docs/specs/PRD.md",
+      "bytes": 30639,
+      "sha256": "b2802853da60cb942506eda7b9f30d6fe581f9cceebc4dac982ec81277165ee3"
+    },
+    {
+      "path": "docs/specs/architecture.md",
+      "bytes": 28753,
+      "sha256": "634eaceb7710538e17455209a525377c072311ea7a099bf5959be67ee084d00e"
+    },
+    {
+      "path": "docs/specs/design.md",
+      "bytes": 18943,
+      "sha256": "5e43c3230dd68b5353f0f404f65bd7b199e78ee1ab3f0c931f780c7bac205cda"
+    },
+    {
+      "path": "docs/specs/master-prompt.md",
+      "bytes": 15991,
+      "sha256": "99186b7a91fd90e3a3d4b6790749f43e1c3041e0c28418558cf7769eca5dbba8"
+    },
+    {
+      "path": "docs/specs/rules.md",
+      "bytes": 12925,
+      "sha256": "0628d8d172b70cd73d121c2f0edce9255f85797e52ab6ae13bd64e2441ba153e"
+    },
+    {
+      "path": "package.json",
+      "bytes": 364,
+      "sha256": "cf93eede9b1b335fd97e845888d7c7e431cf1dacfacc885f6184c69b2ae501ab"
+    },
+    {
+      "path": "renderer/app.js",
+      "bytes": 49642,
+      "sha256": "2a32c29d23a09200928bb1fded04ddc0a532a08d7c386c051e9cec83d49b6dac"
+    },
+    {
+      "path": "renderer/index.html",
+      "bytes": 1455,
+      "sha256": "57d69c9328e6aeabcaf42daf6dca7d9f8ec5c97690aac1a5a7c2dd5f4030c600"
+    },
+    {
+      "path": "renderer/styles.css",
+      "bytes": 23456,
+      "sha256": "b5d2e0a10cbae23217cd0a060d10d3e180c9e053ab28915e99c844a56b05fbb2"
+    },
+    {
+      "path": "scripts/windows-bootstrap.ps1",
+      "bytes": 11390,
+      "sha256": "7ecc9fd2fcefe1e841cd39939594ca80695d388eaf62aa84c03688482699701f"
+    },
+    {
+      "path": "src/lib/atomic-file.cjs",
+      "bytes": 3743,
+      "sha256": "2b931817e6f27e2f32c471cbfe04f2a0442e1ac8765285a1cc118a7f6626ec8c"
+    },
+    {
+      "path": "src/lib/backup.cjs",
+      "bytes": 2113,
+      "sha256": "987103c4a9f98b2f294c8e8bf321bbd67c50e3472c518cad602b93b5e97f8eb6"
+    },
+    {
+      "path": "src/lib/fs-utils.cjs",
+      "bytes": 3859,
+      "sha256": "3cc0ae179613e286c84d7362e9288927de09709ebbbe7914093c774fd70aeb2c"
+    },
+    {
+      "path": "src/lib/orchestrator.cjs",
+      "bytes": 19827,
+      "sha256": "2632c5e7d88b37dc04f3428d553f770110bbcaa9fb2873dc1d01a7882ed372ad"
+    },
+    {
+      "path": "src/lib/process-utils.cjs",
+      "bytes": 2442,
+      "sha256": "e2e351b71f1d04f08dc71a2d61d1d8349e01f6c6fe07929712bfb84da912ada6"
+    },
+    {
+      "path": "src/lib/providers.cjs",
+      "bytes": 27209,
+      "sha256": "63c58486f783264acfe6e754e79bd7cbd5c0e810db569853657fdcc67140b003"
+    },
+    {
+      "path": "src/lib/shared-context.cjs",
+      "bytes": 5798,
+      "sha256": "ca537a96d39d0c940989da0e346123a3805cb7f9953d9a565f2006010c033832"
+    },
+    {
+      "path": "src/lib/store.cjs",
+      "bytes": 4721,
+      "sha256": "32ac67ae28d8dd6538198521fd4c8861bf71f3be58b080037483c047bdfc05c8"
+    },
+    {
+      "path": "src/main.cjs",
+      "bytes": 19288,
+      "sha256": "eab8ae848be0ab321c3adf9c89f9824c7d5c5c68e49a000a52cd18724406bd0f"
+    },
+    {
+      "path": "src/preload.cjs",
+      "bytes": 3627,
+      "sha256": "a5b80643b881cc2d539db3f7b11f910c2730dc008f2c14743a0ef5ab0df0cba3"
+    },
+    {
+      "path": "tests/run-tests.cjs",
+      "bytes": 8519,
+      "sha256": "44f7d5b212163dd41845bcc045cc554c6181fceeef2bfdbfe8cc583571453edc"
+    }
+  ]
+}

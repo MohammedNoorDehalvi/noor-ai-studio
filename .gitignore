@@ -1,0 +1,121 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+.yarn/
+.npm/
+
+# Build and packaged output
+dist/
+build/
+out/
+release/
+*.appx
+*.msix
+*.msi
+*.msi.zip
+*.blockmap
+
+# App-owned runtimes and downloaded tools
+.runtime/
+runtime/
+tools/
+downloads/
+cache/
+.cache/
+
+# Logs and diagnostics
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+debug.log
+crash-reports/
+dumps/
+*.dmp
+
+# Local Noor AI Studio state
+.noor-ai/
+.noor-ai-studio/
+state.json
+state.last-good.json
+events.ndjson
+secrets.json
+shared-context/
+*.noorbackup
+
+# Provider credentials and local configuration
+.codex/
+.ollama/
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Temporary and atomic-write files
+*.tmp
+*.temp
+*.bak
+*.backup
+*.replace-backup-*
+*.tmp-*
+~$*
+*.swp
+*.swo
+
+# Test output
+coverage/
+.nyc_output/
+test-results/
+playwright-report/
+screenshots/
+
+# Electron and Chromium generated files
+electron-cache/
+GPUCache/
+Code Cache/
+DawnCache/
+Network Persistent State
+Local Storage/
+Session Storage/
+WebStorage/
+Cookies
+Cookies-journal
+
+# Windows files
+Thumbs.db
+Thumbs.db:encryptable
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# macOS files
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Linux files
+*~
+.Trash-*
+
+# Editors and IDEs
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.example.json
+.idea/
+*.code-workspace
+
+# TypeScript and tooling caches
+*.tsbuildinfo
+.eslintcache
+.stylelintcache
+
+# Generated archives outside dist
+Noor-AI-Studio-*-portable/
+Noor-AI-Studio-*-portable.zip
+Noor-AI-Studio-*-portable.zip.sha256.txt

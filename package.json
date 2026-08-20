@@ -1,0 +1,12 @@
+{
+  "name": "noor-ai-studio",
+  "version": "0.2.4",
+  "description": "Local-first multi-provider AI development workspace with shared context and shared-context orchestration and stdin-safe Codex CLI execution",
+  "main": "src/main.cjs",
+  "author": "Noor",
+  "license": "UNLICENSED",
+  "private": true,
+  "scripts": {
+    "test": "node tests/run-tests.cjs"
+  }
+}
