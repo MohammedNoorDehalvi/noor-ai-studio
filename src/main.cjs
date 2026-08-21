@@ -51,7 +51,7 @@ function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1480,
     height: 940,
-    minWidth: 1100,
+    minWidth: 900,
     minHeight: 700,
     backgroundColor: '#0a0d13',
     title: 'Noor AI Studio',
@@ -109,6 +109,19 @@ function registerIpc() {
   })));
   ipcMain.handle('app:complete-onboarding', wrap(async () => store.mutate((s) => { s.onboardingComplete = true; })));
   ipcMain.handle('app:update-settings', wrap(async (patch) => store.mutate((s) => { s.settings = { ...s.settings, ...patch }; })));
+  ipcMain.handle('app:reset-data', wrap(async () => {
+    if (orchestrator.hasActiveOperations()) throw new Error('Stop active provider work before resetting application data.');
+    for (const child of previewProcesses.values()) { try { child.kill(); } catch {} }
+    previewProcesses.clear();
+    try { providers.shutdown(); } catch {}
+    contexts.reset();
+    const state = store.reset();
+    providers = new ProviderManager({ store, safeStorage, userData: app.getPath('userData'), emit });
+    contexts = new SharedContextManager(app.getPath('userData'));
+    orchestrator = new Orchestrator({ store, providers, contexts, emit });
+    emit('state-changed', state);
+    return state;
+  }));
 
   ipcMain.handle('provider:refresh-all', wrap(async () => {
     await Promise.allSettled([providers.detectCodex(), providers.refreshGemini(), providers.detectOllama()]);
@@ -200,6 +213,14 @@ function registerIpc() {
   ipcMain.handle('orchestrator:plan', wrap(async (goal) => orchestrator.plan(goal)));
   ipcMain.handle('orchestrator:run', wrap(async (request) => orchestrator.run(request)));
   ipcMain.handle('orchestrator:cancel', wrap(async (runId) => orchestrator.cancel(runId)));
+  ipcMain.handle('orchestrator:delete-run', wrap(async (runId) => {
+    const run = store.getState().runs.find((item) => item.id === runId);
+    if (!run) throw new Error('Agent run not found.');
+    if (run.status === 'running') throw new Error('Stop this run before deleting it.');
+    const state = store.mutate((s) => { s.runs = s.runs.filter((item) => item.id !== runId); });
+    emit('state-changed', state);
+    return state;
+  }));
 
   ipcMain.handle('context:list', wrap(async (projectId) => contexts.list(projectId)));
   ipcMain.handle('context:get-or-create', wrap(async (projectId) => {

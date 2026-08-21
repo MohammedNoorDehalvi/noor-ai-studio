@@ -32,6 +32,21 @@ function Banner([string]$Text) {
   Write-Host "============================================================" -ForegroundColor DarkCyan
 }
 
+function Get-Sha256([string]$File) {
+  # Get-FileHash -Algorithm SHA256 equivalent without depending on module auto-loading.
+  $Stream = [IO.File]::OpenRead($File)
+  try {
+    $Hasher = [Security.Cryptography.SHA256]::Create()
+    try {
+      return ([BitConverter]::ToString($Hasher.ComputeHash($Stream))).Replace('-', '').ToLowerInvariant()
+    } finally {
+      $Hasher.Dispose()
+    }
+  } finally {
+    $Stream.Dispose()
+  }
+}
+
 function Invoke-Retry {
   param(
     [Parameter(Mandatory = $true)][scriptblock]$Operation,
@@ -107,7 +122,7 @@ function Ensure-ElectronRuntime {
   $ChecksumLine = Select-String -LiteralPath $Checksums -Pattern ([regex]::Escape($ElectronArchiveName)) | Select-Object -First 1
   if (-not $ChecksumLine) { throw 'The official Electron checksum list did not contain the requested Windows archive.' }
   $Expected = ($ChecksumLine.Line -split '\s+')[0].ToLowerInvariant()
-  $Actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $Archive).Hash.ToLowerInvariant()
+  $Actual = Get-Sha256 $Archive
   if ($Expected -ne $Actual) {
     Remove-Item -Force $Archive -ErrorAction SilentlyContinue
     throw "Electron checksum verification failed. Expected $Expected but received $Actual."
@@ -221,7 +236,7 @@ function Build-PortableApp {
 
   Write-Host 'Compressing the portable application. This can take several minutes...'
   Compress-Archive -LiteralPath $Portable -DestinationPath $PortableZip -CompressionLevel Optimal -Force
-  $Hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $PortableZip).Hash.ToLowerInvariant()
+  $Hash = Get-Sha256 $PortableZip
   Set-Content -LiteralPath "$PortableZip.sha256.txt" -Encoding ASCII -Value "$Hash  $([IO.Path]::GetFileName($PortableZip))"
 
   Write-Host "Portable application folder: $Portable" -ForegroundColor Green

@@ -134,6 +134,18 @@ class LocalStore {
   writeSecretsEnvelope(envelope) {
     atomicWriteFileSync(this.secretsFile, JSON.stringify(envelope, null, 2), { encoding: 'utf8' });
   }
+
+  reset() {
+    for (const file of [this.stateFile, this.backupFile, this.eventsFile, this.secretsFile]) {
+      try { fs.rmSync(file, { force: true }); } catch {}
+    }
+    for (const name of fs.readdirSync(this.baseDir)) {
+      if (/^(state\.corrupt\.|state(?:\.json)?\.replace-backup-)/i.test(name)) {
+        try { fs.rmSync(path.join(this.baseDir, name), { force: true }); } catch {}
+      }
+    }
+    return this.writeState(this.defaults());
+  }
 }
 
 module.exports = { LocalStore };

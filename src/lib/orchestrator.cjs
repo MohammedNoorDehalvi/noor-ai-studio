@@ -366,6 +366,10 @@ class Orchestrator {
     controller.abort();
     return true;
   }
+
+  hasActiveOperations() {
+    return this.controllers.size > 0;
+  }
 }
 
 module.exports = { Orchestrator, publicPlan, chooseRoles, assignProviders };

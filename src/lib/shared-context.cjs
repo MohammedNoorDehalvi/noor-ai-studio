@@ -130,6 +130,14 @@ class SharedContextManager {
     return this.get(contextId);
   }
 
+  reset() {
+    fs.rmSync(this.baseDir, { recursive: true, force: true });
+    fs.mkdirSync(this.baseDir, { recursive: true });
+    this.index = { schemaVersion: 1, contexts: [] };
+    this.writeIndex();
+    return clone(this.index);
+  }
+
   buildTranscript(contextId, options = {}) {
     const maxChars = Math.max(2000, Math.min(options.maxChars || 50000, 120000));
     const messages = this.readMessages(contextId, options.maxMessages || 500);

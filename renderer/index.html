@@ -9,26 +9,34 @@
 </head>
 <body>
   <div id="app" class="app-shell">
-    <aside class="sidebar">
+    <aside class="sidebar" aria-label="Application navigation">
       <div class="brand">
-        <div class="brand-mark">N</div>
-        <div><strong>Noor AI Studio</strong><span>Local agent workspace</span></div>
+        <div class="brand-mark" aria-hidden="true">N</div>
+        <div><strong>Noor AI Studio</strong><span>AI development workspace</span></div>
       </div>
-      <nav id="nav" class="nav"></nav>
+      <div class="nav-label">Workspace</div>
+      <nav id="nav" class="nav" aria-label="Global areas"></nav>
       <div class="sidebar-footer">
-        <div id="footer-health" class="health-line"><span class="status-dot"></span><span>Checking local services…</span></div>
-        <button class="ghost small" data-action="refresh-all">Refresh status</button>
+        <div id="footer-health" class="health-line" role="status"><span class="status-dot"></span><span>Checking providers…</span></div>
+        <button class="button button-quiet button-small" data-action="refresh-all">Refresh provider status</button>
       </div>
     </aside>
     <main class="main-shell">
       <header class="topbar">
-        <div><h1 id="page-title">Home</h1><p id="page-subtitle">Your local AI development control room</p></div>
+        <div class="page-heading">
+          <nav id="breadcrumb" class="breadcrumb" aria-label="Breadcrumb"><span>Home</span></nav>
+          <div class="title-row"><h1 id="page-title">Home</h1><span id="scope-label" class="scope-label">Application</span></div>
+          <p id="page-subtitle">Loading your workspace…</p>
+        </div>
         <div id="top-actions" class="top-actions"></div>
       </header>
-      <section id="content" class="content"></section>
+      <nav id="project-nav" class="project-nav" aria-label="Project areas" hidden></nav>
+      <section id="content" class="content" aria-live="polite">
+        <div class="loading-state" role="status"><span class="spinner" aria-hidden="true"></span><strong>Opening Noor AI Studio</strong><span>Loading projects and provider status…</span></div>
+      </section>
     </main>
   </div>
-  <div id="toast-root" class="toast-root"></div>
+  <div id="toast-root" class="toast-root" aria-live="polite" aria-atomic="true"></div>
   <div id="modal-root"></div>
   <script src="app.js"></script>
 </body>

@@ -1,531 +1,91 @@
-const appState = {
-  data: null,
-  route: 'home',
-  currentProjectId: null,
-  currentFile: null,
-  fileContent: '',
-  files: [],
-  events: [],
-  system: null,
-  terminal: {},
-  workspaceTab: 'editor',
-  sharedContext: null,
-  sharedContextProjectId: null,
-  contextBusy: false,
-  contextStatus: '',
-  contextParticipants: null,
-  contextRounds: null
-};
+const appState={data:null,route:'home',currentProjectId:null,projectView:'overview',selectedRunId:null,currentFile:null,fileContent:'',files:[],events:[],system:null,terminal:{},sharedContext:null,sharedContextProjectId:null,contextBusy:false,contextStatus:'',contextParticipants:null,contextRounds:null,previousFocus:null,pendingConfirmation:null};
+const $=(s,r=document)=>r.querySelector(s), $$=(s,r=document)=>[...r.querySelectorAll(s)];
+const esc=(v='')=>String(v).replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+const date=v=>v?new Date(v).toLocaleString():'Never', shortDate=v=>v?new Date(v).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}):'';
+const names={codex:'OpenAI Codex',gemini:'Gemini',ollama:'Ollama',system:'System'}, initials={codex:'O',gemini:'G',ollama:'L',user:'N',system:'!'};
+const paths={home:'M3 11.5 12 4l9 7.5M5 10.5V20h14v-9.5M9 20v-6h6v6',projects:'M3 6.5h7l2 2h9V19H3z',providers:'M8 12h8M12 8v8M12 2v3M12 19v3M2 12h3M19 12h3',collaboration:'M21 15a4 4 0 0 1-4 4H8l-5 3v-7a4 4 0 0 1-1-2.6V7a4 4 0 0 1 4-4h11a4 4 0 0 1 4 4zM7 9h10M7 13h6',runs:'M6 3h12a3 3 0 0 1 3 3v12a3 3 0 0 1-3 3H6a3 3 0 0 1-3-3V6a3 3 0 0 1 3-3zm4 5 6 4-6 4z',activity:'M3 12h4l2-6 4 12 2-6h6',backups:'M4 7h16v13H4zM7 4h10v3M9 11h6M9 15h6',settings:'M12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6zm0-7v3m0 14v3M2 12h3m14 0h3M5 5l2 2m10 10 2 2m0-14-2 2M7 17l-2 2',overview:'M3 3h7v7H3zm11 0h7v7h-7zM3 14h7v7H3zm11 0h7v7h-7z',files:'M6 2h8l4 4v16H6zM14 2v5h5M9 12h6M9 16h6',agents:'M5 7h14v12H5zM9 11h.01M15 11h.01M9 15h6M12 3v4',preview:'M2 12s4-6 10-6 10 6 10 6-4 6-10 6S2 12 2 12zm10-2.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5z',validation:'m4 12 5 5L20 6',history:'M3 12a9 9 0 1 0 3-7L3 8M3 3v5h5M12 7v5l3 2'};
+function icon(n){return `<svg class="icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="${paths[n]||paths.overview}"/></svg>`}
+function providerName(id){return id==='user'?(appState.data?.settings?.ownerLabel||'You'):(names[id]||id)}
+function providerInitial(id){return initials[id]||'?'}
+async function call(promise,{silent=false}={}){const r=await promise;if(!r?.ok){const m=r?.error||'The operation failed.';if(!silent)toast(m,'error');throw new Error(m)}return r.data}
+function toast(message,type='success'){const n=document.createElement('div');n.className=`toast ${type}`;n.role=type==='error'?'alert':'status';n.innerHTML=`<b aria-hidden="true">${type==='error'?'!':'✓'}</b><span>${esc(message)}</span>`;$('#toast-root').append(n);setTimeout(()=>n.remove(),4500)}
+function badge(kind,label){return `<span class="status-badge ${kind}"><i aria-hidden="true"></i>${esc(label)}</span>`}
+function runBadge(s){return badge(s==='completed'?'ready':s==='running'?'working':['pending','queued'].includes(s)?'waiting':'error',({completed:'Completed',running:'In progress',pending:'Waiting',queued:'Queued',failed:'Failed',cancelled:'Interrupted'})[s]||s)}
+function currentProject(){return appState.data?.projects.find(p=>p.id===appState.currentProjectId)||null}
+function projectById(id){return appState.data?.projects.find(p=>p.id===id)||null}
+function connectedCount(){const p=appState.data?.providers;return p?['codex','gemini','ollama'].filter(id=>p[id]?.connected).length:0}
+function options(){const p=appState.data?.providers||{};return ['codex','gemini','ollama'].filter(id=>p[id]?.connected)}
+function setPage(title,subtitle,{actions='',crumbs=[],scope='Application'}={}){$('#page-title').textContent=title;$('#page-subtitle').textContent=subtitle;$('#scope-label').textContent=scope;$('#scope-label').classList.toggle('project-scope',scope!=='Application');$('#top-actions').innerHTML=actions;$('#breadcrumb').innerHTML=(crumbs.length?crumbs:[{label:title}]).map((x,i)=>`${i?'<span aria-hidden="true">/</span>':''}${x.route?`<button data-route="${x.route}">${esc(x.label)}</button>`:`<span aria-current="page">${esc(x.label)}</span>`}`).join('')}
+function renderNav(){const running=(appState.data?.runs||[]).filter(r=>r.status==='running').length, items=[['home','Home',''],['projects','Projects',appState.data?.projects.length||''],['providers','Providers',connectedCount()||''],['collaboration','Collaboration',''],['runs','Agent Runs',running||''],['activity','Activity',''],['backups','Backups',''],['settings','Settings','']], projectScoped=appState.route==='workspace'||(appState.route==='collaboration'&&appState.sharedContextProjectId);$('#nav').innerHTML=items.map(([r,l,c])=>{const a=projectScoped?r==='projects':appState.route===r;return `<button class="nav-button ${a?'active':''}" data-route="${r}" ${a?'aria-current="page"':''}>${icon(r)}<span class="nav-text">${l}</span>${c?`<span class="nav-count">${c}</span>`:''}</button>`}).join('');$('#footer-health').innerHTML=`<span class="status-dot ${connectedCount()?'good':''}" aria-hidden="true"></span><span>${connectedCount()?`${connectedCount()} of 3 providers ready`:'No providers connected'}</span>`}
+function renderProjectNav(project,active){const n=$('#project-nav');if(!project){n.hidden=true;n.innerHTML='';return}const tabs=[['overview','Overview'],['files','Files'],['agents','Agents'],['shared-room','Shared Room'],['preview','Preview'],['validation','Validation'],['history','History']];n.hidden=false;n.innerHTML=`<div class="project-nav-context"><span class="project-avatar">${esc(project.name[0]||'P')}</span><span><small>Current project</small><strong>${esc(project.name)}</strong></span></div><div class="project-tabs">${tabs.map(([v,l])=>`<button class="project-tab ${active===v?'active':''}" data-project-view="${v}" ${active===v?'aria-current="page"':''}>${icon(v==='shared-room'?'collaboration':v)}<span>${l}</span></button>`).join('')}</div>`}
+function empty(title,text,action='',i='overview'){return `<div class="empty-state"><span class="empty-icon">${icon(i)}</span><strong>${esc(title)}</strong><p>${esc(text)}</p>${action?`<div class="empty-actions">${action}</div>`:''}</div>`}
+function notice(kind,title,text,action=''){return `<div class="notice ${kind}" role="${kind==='error'?'alert':'status'}"><b aria-hidden="true">${kind==='success'?'✓':kind==='error'?'!':'i'}</b><div><strong>${esc(title)}</strong><p>${esc(text)}</p></div>${action}</div>`}
+function render(){renderNav();if(!appState.data?.onboardingComplete)return renderOnboarding();({home:renderHome,projects:renderProjects,providers:renderProviders,collaboration:renderCollaboration,runs:renderRuns,activity:renderActivity,backups:renderBackups,settings:renderSettings,workspace:renderWorkspace}[appState.route]||renderHome)();decorateDestructiveActions()}
+function decorateDestructiveActions(){if(appState.route==='runs'){const run=appState.data.runs.find(r=>r.id===appState.selectedRunId)||appState.data.runs[0];if(run&&run.status!=='running')$('#top-actions').insertAdjacentHTML('afterbegin',`<button class="button button-danger" data-delete-run="${run.id}">Delete selected run</button>`)}if(appState.route==='settings')$('#content').insertAdjacentHTML('beforeend','<section class="danger-zone"><span class="eyebrow">Danger zone</span><h2>Delete all Noor application data</h2><p>Removes projects from Noor, agent runs, activity, settings, Shared Room transcripts, and saved provider credentials. Project folders and installed provider software remain on this computer.</p><button class="button button-danger" data-reset-app>Delete all application data</button></section>')}
+function renderOnboarding(){renderProjectNav();setPage('Set up Noor AI Studio','Confirm local storage, then connect the providers you want.',{crumbs:[{label:'Welcome'}]});const checks=[['Operating system',`${appState.system?.platform||'Checking'} ${appState.system?.arch||''}`,true],['Local storage',appState.system?.userData||'Checking…',!!appState.system?.userData],['Secret encryption',appState.system?.encryptionAvailable?'Available':'Unavailable',!!appState.system?.encryptionAvailable],['Providers',connectedCount()?`${connectedCount()} connected`:'Connect after setup',true]];$('#content').innerHTML=`<div class="onboarding"><span class="eyebrow">Local-first setup</span><h2>A clearer AI development workspace</h2><p>Projects, provider connections, shared conversations, and agent runs stay visibly separated. Existing local data is preserved.</p><div class="setup-checks">${checks.map(([l,v,ok])=>`<div><b>${ok?'✓':'!'}</b><span><strong>${l}</strong><small>${esc(v)}</small></span>${badge(ok?'ready':'error',ok?'Ready':'Attention')}</div>`).join('')}</div><div class="onboarding-actions"><button class="button button-secondary" data-route="providers">Review providers</button><button class="button button-primary" data-action="complete-onboarding">Continue</button></div></div>`}
+function renderHome(){renderProjectNav();const projects=appState.data.projects.slice(0,4),runs=appState.data.runs.slice(0,4),active=appState.data.runs.filter(r=>r.status==='running').length,review=appState.data.runs.filter(r=>['failed','cancelled'].includes(r.status)).length;setPage('Home','Your application-wide overview and recommended next action.',{actions:'<button class="button button-secondary" data-action="import-project">Import folder</button><button class="button button-primary" data-action="new-project">New project</button>',crumbs:[{label:'Home'}]});let next=!projects.length?['Create your first project','A project gives files, agents, validation, and Shared Room a clear scope.','<button class="button button-primary" data-action="new-project">Create project</button>']:connectedCount()===0?['Connect an AI provider','Connect Codex, Gemini, or Ollama before starting collaborative work.','<button class="button button-primary" data-route="providers">Connect provider</button>']:[`Continue ${projects[0].name}`,'Open its workspace to edit files, start agents, or enter Shared Room.',`<button class="button button-primary" data-open-project="${projects[0].id}">Open project</button>`];$('#content').innerHTML=`<div class="home-intro"><div><span class="eyebrow">Recommended next step</span><h2>${esc(next[0])}</h2><p>${esc(next[1])}</p></div>${next[2]}</div><div class="metrics"><div><span>Projects</span><strong>${appState.data.projects.length}</strong><small>Registered locally</small></div><div><span>Providers ready</span><strong>${connectedCount()}<em>/3</em></strong><small>Available for automatic work</small></div><div><span>Active runs</span><strong>${active}</strong><small>${active?'Agents currently working':'No agents working'}</small></div><div><span>Needs review</span><strong>${review}</strong><small>Failed or interrupted</small></div></div><div class="content-grid"><section><div class="section-heading"><div><h2>Recent projects</h2><p>Project-scoped workspaces.</p></div><button class="button button-quiet" data-route="projects">View all</button></div>${projects.length?`<div class="surface list">${projects.map(projectRow).join('')}</div>`:empty('No projects yet','Create a project or import a folder.','<button class="button button-primary" data-action="new-project">Create project</button>','projects')}</section><section><div class="section-heading"><div><h2>Recent agent runs</h2><p>Execution and provider status.</p></div><button class="button button-quiet" data-route="runs">View all</button></div>${runs.length?`<div class="surface list">${runs.map(runRow).join('')}</div>`:empty('No agent runs','Open a project to start a reviewed run.','','runs')}</section></div>`}
+function projectRow(p){return `<article class="list-row"><span class="row-icon">${icon('projects')}</span><div class="list-row-main"><strong>${esc(p.name)}</strong><span>${esc(p.goal||'No project goal yet')}</span><small>${esc(p.path)}</small></div><button class="button button-secondary" data-open-project="${p.id}">Open</button></article>`}
+function runRow(r){const p=projectById(r.projectId),working=r.agents?.find(a=>a.status==='running');return `<button class="list-row row-button" data-open-run="${r.id}"><span class="row-icon">${icon('runs')}</span><span class="list-row-main"><strong>${esc(r.goal)}</strong><span>${esc(p?.name||'Project no longer registered')} · ${esc((r.providers||[r.provider]).filter(Boolean).map(providerName).join(' + '))}</span><small>${working?`${working.role} is working`:date(r.startedAt)}</small></span>${runBadge(r.status)}</button>`}
+function renderProjects(){renderProjectNav();setPage('Projects','Each project has its own files, agents, Shared Room, validation, and history.',{actions:'<button class="button button-secondary" data-action="import-project">Import folder</button><button class="button button-primary" data-action="new-project">New project</button>',crumbs:[{label:'Projects'}]});$('#content').innerHTML=`<div class="section-intro"><span class="eyebrow">Project scope</span><h2>Choose where you want to work</h2><p>Actions inside a project affect that folder and its saved context. Providers and global activity remain application-wide.</p></div>${appState.data.projects.length?`<div class="project-grid">${appState.data.projects.map(p=>`<article class="project-card"><div class="project-card-top"><span class="project-avatar large">${esc(p.name[0]||'P')}</span><div>${badge('neutral','Local project')}<h2>${esc(p.name)}</h2></div></div><p>${esc(p.goal||'Add a goal when you start an agent run.')}</p><dl class="detail-list"><div><dt>Folder</dt><dd>${esc(p.path)}</dd></div><div><dt>Last activity</dt><dd>${date(p.lastActivity)}</dd></div></dl><div class="card-actions"><button class="button button-quiet" data-open-folder="${p.id}">Open folder</button><button class="button button-secondary" data-backup="${p.id}">Back up</button><button class="button button-secondary" data-open-project="${p.id}">Open workspace</button><button class="button button-danger button-icon" aria-label="Remove ${esc(p.name)}" data-remove-project="${p.id}">×</button></div></article>`).join('')}</div>`:empty('No projects registered','Create a project or import an existing folder.','<button class="button button-secondary" data-action="import-project">Import folder</button><button class="button button-primary" data-action="new-project">Create project</button>','projects')}`}
+function stateFor(p,manual=false){if(manual)return['manual','Manual handoff','Available from a project; not part of Shared Room'];if(p?.connected)return['ready','Connected','Available for Shared Room and agent roles'];if(p?.installed)return['waiting','Installed, disconnected','Connect before assigning work'];return['offline','Unavailable','Set up before assigning work']}
+function providerCard(id,title,type,desc,p,actions){const s=stateFor(p,id==='antigravity'),models=p?.models||[];return `<article class="provider-card"><header><span class="provider-logo ${id}">${providerInitial(id)}</span><div><span class="eyebrow">${type}</span><h2>${title}</h2></div>${badge(s[0],s[1])}</header><p>${desc}</p><div class="availability-line"><b>${s[0]==='ready'?'✓':s[0]==='manual'?'↗':'!'}</b>${s[2]}</div><dl class="detail-list"><div><dt>Status detail</dt><dd>${esc(p?.detail||s[1])}</dd></div><div><dt>Selected model</dt><dd>${esc(p?.model||(id==='codex'&&p?.connected?'Managed by Codex':'None selected'))}</dd></div><div><dt>Last check</dt><dd>${date(p?.lastCheck)}</dd></div></dl>${models.length?`<div class="field"><label for="model-${id}">Default model</label><select class="input" id="model-${id}" data-provider-model="${id}">${models.map(m=>`<option value="${esc(m.id)}" ${m.id===p.model?'selected':''}>${esc(m.name||m.id)}</option>`).join('')}</select><span class="field-help">Used by new Shared Room and agent work.</span></div>`:''}<div class="card-actions">${actions}</div></article>`}
+function renderProviders(){renderProjectNav();const p=appState.data.providers;setPage('Providers','Application-wide connections and default models used by projects.',{actions:'<button class="button button-secondary" data-action="refresh-all">Refresh all providers</button>',crumbs:[{label:'Providers'}]});$('#content').innerHTML=`<div class="provider-summary"><div><span class="eyebrow">Application scope</span><h2>${connectedCount()} of 3 automatic providers ready</h2><p>Connections here affect every project. Shared Room and agent setup still choose who participates.</p></div>${['codex','gemini','ollama'].map(id=>`<span>${badge(p[id]?.connected?'ready':'offline',providerName(id))}<small>${esc(p[id]?.model||'No model selected')}</small></span>`).join('')}</div><div class="provider-grid">${providerCard('codex','OpenAI Codex','Cloud · automatic','Official Codex CLI. Shared Room is read-only; assigned agents can edit project files.',p.codex,`${!p.codex.installed?'<button class="button button-primary" data-action="codex-install">Install Codex</button>':p.codex.connected?'<button class="button button-danger" data-action="codex-logout">Disconnect</button>':'<button class="button button-primary" data-action="codex-login">Sign in with ChatGPT</button><button class="button button-secondary" data-action="codex-api-key">Use API key</button>'}<button class="button button-quiet" data-action="codex-docs">Official docs</button>`)}${providerCard('gemini','Gemini','Cloud · automatic','Encrypted Google AI Studio key with dynamically discovered compatible models.',p.gemini,`${p.gemini.connected?'<button class="button button-danger" data-action="gemini-disconnect">Disconnect</button>':'<button class="button button-primary" data-action="gemini-connect">Connect Gemini</button>'}<button class="button button-quiet" data-action="gemini-key-page">Open key page</button>`)}${providerCard('ollama','Ollama','Local · automatic','Models run on this computer through the localhost-only Ollama service.',p.ollama,`${!p.ollama.installed?'<button class="button button-primary" data-action="ollama-install">Install and start</button>':!p.ollama.connected?'<button class="button button-primary" data-action="ollama-start">Start service</button><button class="button button-secondary" data-action="ollama-detect">Check again</button>':'<button class="button button-secondary" data-action="ollama-detect">Check service</button><button class="button button-primary" data-action="ollama-pull">Download model</button>'}<button class="button button-quiet" data-action="ollama-download">Official page</button>`)}${providerCard('antigravity','Antigravity','External · manual','Creates a task packet and opens the selected project folder. Noor does not access its credentials.',{detail:'Available as a manual project action'},'<button class="button button-secondary" data-route="projects">Choose project</button>')}</div>`}
+function renderCollaborationHub(){renderProjectNav();setPage('Collaboration','Coordinate connected AI providers through project-scoped Shared Rooms.',{actions:'<button class="button button-primary" data-route="projects">Choose a project</button>',crumbs:[{label:'Collaboration'}]});const projects=appState.data.projects,p=appState.data.providers;$('#content').innerHTML=`<div class="collaboration-intro"><div><span class="eyebrow">Application collaboration hub</span><h2>One shared context, several perspectives</h2><p>Codex, Gemini, and Ollama read the same project conversation and contribute in sequence. Each can see earlier contributions before responding.</p><div class="collaboration-flow"><span>You set project context</span><b>→</b><span>Providers contribute in order</span><b>→</b><span>Transcript stays with project</span></div></div><aside><span class="eyebrow">Available participants</span>${['codex','gemini','ollama'].map(id=>`<div class="participant-summary-row"><span class="provider-logo ${id}">${providerInitial(id)}</span><span><strong>${providerName(id)}</strong><small>${esc(p[id]?.model||'No model selected')}</small></span>${badge(p[id]?.connected?'ready':'offline',p[id]?.connected?'Ready':'Not connected')}</div>`).join('')}<button class="button button-quiet" data-route="providers">Manage providers</button></aside></div><section class="section"><div class="section-heading"><div><h2>Open a project Shared Room</h2><p>The transcript and file snapshot belong to the selected project.</p></div></div>${!projects.length?empty('No project available','Create or import a project first.','<button class="button button-primary" data-action="new-project">Create project</button>','collaboration'):!options().length?notice('warning','Connect a provider first','Shared Room needs at least one connected provider.','<button class="button button-secondary" data-route="providers">Open providers</button>'):`<div class="surface list">${projects.map(p=>`<article class="list-row"><span class="project-avatar">${esc(p.name[0]||'P')}</span><div class="list-row-main"><strong>${esc(p.name)}</strong><span>${esc(p.goal||'Project-scoped shared conversation')}</span><small>${esc(p.path)}</small></div><button class="button button-primary" data-open-context="${p.id}">Open Shared Room</button></article>`).join('')}</div>`}</section>`}
+async function openSharedRoom(id,newRoom=false){if(!id){appState.route='collaboration';appState.sharedContextProjectId=null;appState.sharedContext=null;return render()}if(appState.sharedContextProjectId!==id){appState.contextParticipants=null;appState.contextRounds=null}appState.currentProjectId=id;appState.sharedContextProjectId=id;if(newRoom)appState.sharedContext=null;appState.route='collaboration';appState.contextStatus='Loading the project transcript…';render();try{appState.sharedContext=await call(newRoom?window.noor.contexts.create(id):window.noor.contexts.getOrCreate(id),{silent:true});appState.contextStatus=''}catch(e){appState.contextStatus=e.message}render()}
+function messageCard(m){const id=m.provider||'system',details=[m.role,m.model,m.round?`Round ${m.round}`:null].filter(Boolean).join(' · ');return `<article class="context-message ${id} ${m.kind==='error'?'error':''}" aria-label="Message from ${esc(providerName(id))}"><span class="context-avatar ${id}">${providerInitial(id)}</span><div class="context-bubble"><header><div><strong>${esc(providerName(id))}</strong><span>${esc(details)}</span></div><time>${shortDate(m.at)}</time></header><div>${esc(m.content).replace(/\n/g,'<br>')}</div></div></article>`}
+function renderCollaboration(){if(!appState.sharedContextProjectId)return renderCollaborationHub();const project=projectById(appState.sharedContextProjectId);if(!project){appState.sharedContextProjectId=null;return renderCollaborationHub()}renderProjectNav(project,'shared-room');setPage('Shared Room','Multiple providers read and contribute to one project conversation.',{actions:'<button class="button button-secondary" data-action="new-context">New room</button>',crumbs:[{label:'Projects',route:'projects'},{label:project.name},{label:'Shared Room'}],scope:project.name});const ids=options(),context=appState.sharedContext?.projectId===project.id?appState.sharedContext:null,messages=context?.messages||[],preferred=appState.contextParticipants||appState.data.settings.defaultParticipants||ids,rounds=Number(appState.contextRounds||appState.data.settings.sharedContextRounds||1);$('#content').innerHTML=`${!ids.length?notice('warning','No providers can participate','Connect Codex, Gemini, or Ollama.','<button class="button button-secondary" data-route="providers">Manage providers</button>'):''}<div class="room-shell"><aside class="room-sidebar"><div class="room-scope"><span class="eyebrow">Project Shared Room</span><strong>${esc(project.name)}</strong><small>${esc(project.path)}</small></div><div class="room-explainer"><strong>How contributions work</strong><p>Selected providers read this project’s files and saved transcript, then respond in sequence.</p></div><fieldset class="participant-list"><legend>Participating models</legend>${['codex','gemini','ollama'].map(id=>{const p=appState.data.providers[id],ready=!!p?.connected,working=appState.contextBusy&&appState.contextStatus.toLowerCase().includes(providerName(id).toLowerCase().replace('openai ',''));return `<label class="participant ${ready?'':'offline'} ${working?'working':''}"><input type="checkbox" data-context-provider="${id}" ${ready&&preferred.includes(id)?'checked':''} ${ready?'':'disabled'}><span class="provider-logo ${id}">${providerInitial(id)}</span><span><strong>${providerName(id)}</strong><small>${ready?esc(p.model||'Provider default'):'Not connected'}</small></span>${badge(working?'working':ready?'ready':'offline',working?'Working':ready?'Ready':'Offline')}</label>`}).join('')}</fieldset><div class="field"><label for="context-rounds">Conversation rounds</label><select class="input" id="context-rounds"><option value="1" ${rounds===1?'selected':''}>1 round · one response each</option><option value="2" ${rounds===2?'selected':''}>2 rounds · rebut and refine</option></select></div><button class="button button-danger button-block" data-action="clear-context" ${context?.messageCount?'':'disabled'}>Clear room transcript</button></aside><section class="room-main"><header class="room-header"><div><span class="eyebrow">Shared local memory</span><h2>${esc(context?.title||'Preparing room…')}</h2><p>${context?`${context.messageCount} messages · saved locally for ${esc(project.name)}`:'Loading transcript…'}</p></div><div class="provider-stack">${ids.map(id=>`<span class="provider-logo ${id}" aria-label="${providerName(id)}">${providerInitial(id)}</span>`).join('')}</div></header><div class="context-feed" id="context-feed">${messages.length?messages.map(messageCard).join(''):`<div class="room-empty"><span class="empty-icon">${icon('collaboration')}</span><h3>Start this project conversation</h3><p>Ask for an architecture decision, debugging diagnosis, code review, or plan.</p><button class="suggestion" data-context-prompt="Review this project and identify the highest-impact next step.">Identify the next step</button></div>`}</div><div class="context-status ${appState.contextBusy?'working':''}" role="status">${appState.contextBusy?'<span class="spinner"></span>':'<i></i>'}${esc(appState.contextStatus||'Ready for your message')}</div><div class="context-composer"><label class="sr-only" for="context-message">Message for providers</label><textarea class="input" id="context-message" aria-describedby="context-help context-message-error" placeholder="Ask the providers to discuss, compare, review, or solve…" ${appState.contextBusy?'disabled':''}></textarea><p class="form-error" id="context-message-error" hidden></p><div class="composer-footer"><span id="context-help">Ctrl + Enter to send · providers contribute in order</span><button class="button button-primary" data-action="send-context" ${appState.contextBusy||!context||!ids.length?'disabled':''}>${appState.contextBusy?'Providers working…':'Send to providers'}</button></div></div></section></div>`;requestAnimationFrame(()=>{const f=$('#context-feed');if(f)f.scrollTop=f.scrollHeight})}
+function renderRuns(){renderProjectNav();const runs=appState.data.runs,selected=runs.find(r=>r.id===appState.selectedRunId)||runs[0];if(selected)appState.selectedRunId=selected.id;setPage('Agent Runs','Application-wide execution status for single and multi-provider work.',{actions:'<button class="button button-primary" data-route="projects">Start from a project</button>',crumbs:[{label:'Agent Runs'}]});$('#content').innerHTML=!runs.length?empty('No agent runs yet','Open a project and start a reviewed plan.','<button class="button button-primary" data-route="projects">Choose project</button>','runs'):`<div class="runs-layout"><aside class="runs-list">${runs.map(r=>`<button class="run-list-item ${r.id===selected.id?'active':''}" data-open-run="${r.id}"><span><strong>${esc(r.goal)}</strong>${runBadge(r.status)}</span><small>${esc(projectById(r.projectId)?.name||'Project no longer registered')}</small><time>${date(r.startedAt)}</time></button>`).join('')}</aside>${runDetails(selected)}</div>`}
+function runDetails(run,compact=false){if(!run)return '';const agents=run.agents||[],done=agents.filter(a=>a.status==='completed').length,current=agents.find(a=>a.status==='running'),p=projectById(run.projectId);return `<section class="run-detail ${compact?'compact':''}"><header><div><span class="eyebrow">${(run.providers||[run.provider]).filter(Boolean).length>1?'Multi-provider collaborative run':'Single-provider agent run'}</span><h2>${esc(run.goal)}</h2><p>${esc(p?.name||'Project no longer registered')} · ${date(run.startedAt)}</p></div>${runBadge(run.status)}</header><div class="run-overview"><div><span>Progress</span><strong>${done} of ${agents.length} agents complete</strong><div class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="${agents.length||1}" aria-valuenow="${done}"><i style="width:${agents.length?done/agents.length*100:0}%"></i></div></div><div><span>Current activity</span><strong>${current?`${current.role} · ${providerName(current.provider)}`:run.status==='completed'?'Run completed':'No agent working'}</strong></div></div><ol class="agent-sequence">${agents.map((a,i)=>`<li class="${a.status}"><span class="step-number">${a.status==='completed'?'✓':i+1}</span><div><header><strong>${esc(a.role)}</strong>${runBadge(a.status)}</header><span>${providerName(a.provider||'system')}${a.model?` · ${esc(a.model)}`:''}</span><p>${esc(a.summary||a.purpose||'Waiting for its turn.')}</p>${a.files?.length?`<details><summary>${a.files.length} changed files</summary><p>${esc(a.files.join(', '))}</p></details>`:''}</div></li>`).join('')}</ol>${run.finalSummary?`<details class="completion-report"><summary>Completion report</summary><pre>${esc(run.finalSummary)}</pre></details>`:''}<div class="run-actions">${p?`<button class="button button-secondary" data-open-project="${p.id}">Open project</button>`:''}${run.status==='running'?`<button class="button button-danger" data-cancel-run="${run.id}">Stop run</button>`:''}</div></section>`}
+function eventRow(e){return `<article class="event"><i class="${e.level||'info'}"></i><div><strong>${esc(e.message)}</strong><span>${esc(e.role||'Application event')}</span></div><time>${date(e.at)}</time></article>`}
+function renderActivity(){renderProjectNav();setPage('Activity','Application-wide local history for providers, files, collaboration, and runs.',{actions:'<button class="button button-secondary" data-action="reload-events">Reload activity</button>',crumbs:[{label:'Activity'}]});$('#content').innerHTML=`<div class="section-intro"><span class="eyebrow">Local event journal</span><h2>What changed across Noor AI Studio</h2><p>Sensitive credentials are excluded. Project-attributed events also appear in project History.</p></div>${appState.events.length?`<div class="surface timeline">${appState.events.map(eventRow).join('')}</div>`:empty('No activity recorded','Provider checks, file saves, runs, and backups appear here.','','activity')}`}
+function renderBackups(){renderProjectNav();setPage('Backups','Create and restore portable project archives.',{actions:'<button class="button button-primary" data-action="restore-backup">Restore backup</button>',crumbs:[{label:'Backups'}]});$('#content').innerHTML=`<div class="section-intro"><span class="eyebrow">Recovery</span><h2>Project files, without generated clutter</h2><p>Archives exclude .git, dependencies, build output, and Noor internal state.</p></div>${appState.data.projects.length?`<div class="surface list">${appState.data.projects.map(p=>`<article class="list-row"><span class="project-avatar">${esc(p.name[0]||'P')}</span><div class="list-row-main"><strong>${esc(p.name)}</strong><span>${esc(p.path)}</span><small>Last activity ${date(p.lastActivity)}</small></div><button class="button button-secondary" data-backup="${p.id}">Create backup</button></article>`).join('')}</div>`:empty('No project to back up','Register a project first.','<button class="button button-primary" data-route="projects">Open projects</button>','backups')}`}
+function renderSettings(){renderProjectNav();const s=appState.data.settings;setPage('Settings','Application-wide preferences, storage, and diagnostics.',{actions:'<button class="button button-secondary" data-action="export-diagnostics">Export diagnostics</button><button class="button button-primary" data-action="save-settings">Save settings</button>',crumbs:[{label:'Settings'}]});$('#content').innerHTML=`<div class="settings-layout"><section><div class="section-heading"><div><h2>General preferences</h2><p>Defaults for new project work.</p></div></div><div class="settings-fields"><div class="field"><label for="owner-label">Your display label</label><input class="input" id="owner-label" value="${esc(s.ownerLabel||'Noor')}" aria-describedby="owner-label-error"><span class="field-help">Shown as message ownership in Shared Room.</span><p class="form-error" id="owner-label-error" hidden></p></div><div class="field"><label for="default-provider">Default provider</label><select class="input" id="default-provider"><option value="codex" ${s.defaultProvider==='codex'?'selected':''}>OpenAI Codex</option><option value="gemini" ${s.defaultProvider==='gemini'?'selected':''}>Gemini</option><option value="ollama" ${s.defaultProvider==='ollama'?'selected':''}>Ollama</option></select></div><div class="field"><label for="max-agents">Maximum planned agents</label><input class="input" id="max-agents" type="number" min="1" max="6" value="${Number(s.maxAgents||4)}" aria-describedby="max-agents-error"><p class="form-error" id="max-agents-error" hidden></p></div><div class="field"><label for="shared-rounds">Default Shared Room rounds</label><select class="input" id="shared-rounds"><option value="1" ${Number(s.sharedContextRounds||1)===1?'selected':''}>1 round · faster</option><option value="2" ${Number(s.sharedContextRounds||1)===2?'selected':''}>2 rounds · rebut and refine</option></select></div></div></section><aside class="system-panel"><span class="eyebrow">This device</span><h2>System and storage</h2><dl class="detail-list"><div><dt>Platform</dt><dd>${esc(appState.system?.platform)} ${esc(appState.system?.arch)}</dd></div><div><dt>Memory</dt><dd>${esc(appState.system?.memoryGb)} GB</dd></div><div><dt>Encrypted secrets</dt><dd>${appState.system?.encryptionAvailable?'Available':'Unavailable'}</dd></div><div><dt>App data</dt><dd>${esc(appState.system?.userData)}</dd></div></dl>${notice(appState.system?.encryptionAvailable?'success':'warning',appState.system?.encryptionAvailable?'Secrets protected':'Encryption unavailable',appState.system?.encryptionAvailable?'Diagnostics exclude credentials.':'Avoid saving credentials until encryption is available.')}</aside></div>`}
+async function openWorkspace(id,view='overview'){appState.currentProjectId=id;appState.route='workspace';appState.projectView=view;appState.currentFile=null;appState.fileContent='';try{appState.files=await call(window.noor.projects.listFiles(id))}catch(e){appState.files=[];console.error(e)}render()}
+function renderWorkspace(){const p=currentProject();if(!p){appState.route='projects';return renderProjects()}const labels={overview:'Overview',files:'Files',agents:'Agents',preview:'Preview',validation:'Validation',history:'History'},view=labels[appState.projectView]?appState.projectView:'overview',actions={overview:`<button class="button button-secondary" data-open-folder="${p.id}">Open folder</button><button class="button button-primary" data-action="plan-run">New agent run</button>`,files:`<button class="button button-secondary" data-action="reload-files">Refresh files</button>${appState.currentFile?'<button class="button button-primary" data-action="save-file">Save file</button>':''}`,agents:'<button class="button button-primary" data-action="plan-run">New agent run</button>',preview:`<button class="button button-primary" data-preview="${p.id}">Start preview</button>`,validation:'<button class="button button-primary" data-action="run-safe-command">Run selected check</button>',history:''};renderProjectNav(p,view);setPage(labels[view],`${labels[view]} for ${p.name}.`,{actions:actions[view],crumbs:[{label:'Projects',route:'projects'},{label:p.name},{label:labels[view]}],scope:p.name});$('#content').innerHTML=({overview:projectOverview,files:projectFiles,agents:projectAgents,preview:projectPreview,validation:projectValidation,history:projectHistory})[view](p)}
+function projectOverview(p){const runs=appState.data.runs.filter(r=>r.projectId===p.id),recent=runs[0],files=appState.files.filter(f=>f.type==='file').length;return `<div class="project-overview-hero"><div><span class="eyebrow">Project workspace</span><h2>${esc(p.name)}</h2><p>${esc(p.goal||'No goal set. Start an agent run to define the next outcome.')}</p><small>${esc(p.path)}</small></div><aside><strong>Actions here affect this project</strong><p>Files, agent runs, Shared Room, validation, previews, and handoffs use this folder and context.</p></aside></div><div class="metrics project-metrics"><div><span>Readable files</span><strong>${files}</strong><small>Available in editor</small></div><div><span>Agent runs</span><strong>${runs.length}</strong><small>${recent?`Latest: ${recent.status}`:'None yet'}</small></div><div><span>Shared Room</span><strong>${options().length}</strong><small>Providers available</small></div></div><div class="content-grid"><section><div class="section-heading"><div><h2>Continue working</h2><p>Project context stays visible.</p></div></div><div class="quick-actions">${[['files','Edit project files','Browse and save text files'],['shared-room','Open Shared Room','Providers discuss one context'],['validation','Validate changes','Run an approved command'],['preview','Start preview','Launch the detected preview']].map(([v,t,d])=>`<button data-project-view="${v}">${icon(v==='shared-room'?'collaboration':v)}<span><strong>${t}</strong><small>${d}</small></span></button>`).join('')}</div></section><section><div class="section-heading"><div><h2>Latest agent run</h2><p>Provider and specialist status.</p></div></div>${recent?runDetails(recent,true):empty('No run for this project','Describe an outcome and review provider assignments.','<button class="button button-primary" data-action="plan-run">Plan first run</button>','agents')}<div class="handoff-panel"><div><strong>Antigravity manual handoff</strong><p>Create a task packet and open this folder.</p></div><button class="button button-secondary" data-handoff="${p.id}">Create handoff</button></div></section></div>`}
+function projectFiles(){const files=appState.files.filter(f=>f.type==='file');return `<div class="files-layout"><aside class="file-panel"><header><strong>Project files</strong><span>${files.length} readable</span></header><div class="file-tree">${files.length?files.map(f=>`<button class="file-item ${appState.currentFile===f.path?'active':''}" data-file="${esc(f.path)}">${icon('files')}<span>${esc(f.path)}</span></button>`).join(''):empty('No readable files','Start an agent run or add files.','<button class="button button-primary" data-action="plan-run">Start run</button>','files')}</div></aside><section class="editor-panel"><header><div><span class="eyebrow">File editor</span><strong>${esc(appState.currentFile||'Select a file')}</strong></div></header>${appState.currentFile?`<label class="sr-only" for="editor">File contents</label><textarea id="editor" class="editor" spellcheck="false">${esc(appState.fileContent)}</textarea>`:empty('Choose a file','Saving writes directly to this project folder.','','files')}</section></div>`}
+function projectAgents(p){const runs=appState.data.runs.filter(r=>r.projectId===p.id),selected=runs.find(r=>r.id===appState.selectedRunId)||runs[0];return !runs.length?empty('No agent runs in this project','Start with a goal, then review roles and providers.','<button class="button button-primary" data-action="plan-run">Plan run</button>','agents'):`<div class="runs-layout"><aside class="runs-list">${runs.map(r=>`<button class="run-list-item ${r.id===selected.id?'active':''}" data-open-project-run="${r.id}"><span><strong>${esc(r.goal)}</strong>${runBadge(r.status)}</span><small>${esc((r.providers||[r.provider]).filter(Boolean).map(providerName).join(' + '))}</small><time>${date(r.startedAt)}</time></button>`).join('')}</aside>${runDetails(selected)}</div>`}
+function projectPreview(p){return `<div class="feature-page"><section><span class="feature-icon">${icon('preview')}</span><span class="eyebrow">Project preview</span><h2>Launch the detected development experience</h2><p>Noor checks existing project configuration and starts a supported preview without replacing scripts.</p>${notice('info','Project-scoped action',`Preview uses ${p.path} and does not affect other projects.`)}</section><aside><h3>Before you start</h3><ul><li>Make sure dependencies are available.</li><li>Run a build or test in Validation first.</li><li>Noor reports when no preview command is detected.</li></ul></aside></div>`}
+function projectValidation(p){const out=appState.terminal[p.id]||'Validation output will appear here.\n';return `<div class="validation-layout"><section><span class="eyebrow">Approved commands only</span><h2>Validate ${esc(p.name)}</h2><p>Noor does not expose an unrestricted terminal.</p><div class="field"><label for="safe-command">Validation command</label><select class="input" id="safe-command"><option>git status</option><option>git diff</option><option>npm test</option><option>npm run build</option><option>npm run lint</option></select><span class="field-help">Runs only inside this project folder.</span></div></section><section class="terminal-panel"><header><div><strong>Validation output</strong><span>${esc(p.path)}</span></div><button class="button button-quiet" data-action="clear-terminal">Clear</button></header><pre class="terminal" id="terminal-output" tabindex="0">${esc(out)}</pre></section></div>`}
+function projectHistory(p){const events=appState.events.filter(e=>e.projectId===p.id);return `<div class="section-heading"><div><h2>${esc(p.name)} history</h2><p>Events explicitly attributed to this project.</p></div><button class="button button-secondary" data-action="reload-events">Reload</button></div>${events.length?`<div class="surface timeline">${events.map(eventRow).join('')}</div>`:empty('No attributed project events','Use global Activity for the complete journal.','<button class="button button-secondary" data-route="activity">Open Activity</button>','history')}`}
+function modal(title,subtitle,body,footer='',large=false){appState.previousFocus=document.activeElement;$('#modal-root').innerHTML=`<div class="modal-backdrop"><section class="modal ${large?'modal-large':''}" role="dialog" aria-modal="true" aria-labelledby="modal-title" aria-describedby="modal-subtitle"><header class="modal-header"><div><h2 id="modal-title">${esc(title)}</h2><p id="modal-subtitle">${esc(subtitle)}</p></div><button class="button button-quiet button-icon" aria-label="Close dialog" data-action="close-modal">×</button></header><div class="modal-body">${body}</div>${footer?`<footer class="modal-footer">${footer}</footer>`:''}</section></div>`;requestAnimationFrame(()=>($('#modal-root [autofocus]')||$('#modal-root button,input,textarea,select'))?.focus())}
+function closeModal(){$('#modal-root').innerHTML='';appState.pendingConfirmation=null;if(appState.previousFocus?.isConnected)appState.previousFocus.focus()}
+function confirmModal(title,text,label,pending){appState.pendingConfirmation=pending;modal(title,'Review the effect before continuing.',`<div class="confirm-content"><b>!</b><p>${esc(text)}</p></div>`,`<button class="button button-secondary" data-action="close-modal">Cancel</button><button class="button button-danger" data-action="confirm-pending">${label}</button>`)}
+function newProjectModal(){modal('Create a local project','Choose its parent folder after this step.',`<div class="field"><label for="new-project-name">Project name</label><input class="input" id="new-project-name" autofocus aria-describedby="new-project-name-error" placeholder="Customer portal"><p class="form-error" id="new-project-name-error" hidden></p></div><div class="field"><label for="new-project-goal">Initial goal <small>Optional</small></label><textarea class="input" id="new-project-goal"></textarea></div>`,`<button class="button button-secondary" data-action="close-modal">Cancel</button><button class="button button-primary" data-action="create-project">Create project</button>`)}
+function keyModal(id){const g=id==='gemini';modal(g?'Connect Gemini':'Connect OpenAI Codex',g?'The key is validated and encrypted.':'The key goes to the official Codex login command.',`<div class="field"><label for="provider-key">${g?'Gemini':'OpenAI'} API key</label><input class="input" id="provider-key" type="password" autocomplete="off" autofocus aria-describedby="provider-key-error"><span class="field-help">Never written to normal state, logs, projects, or diagnostics.</span><p class="form-error" id="provider-key-error" hidden></p></div>`,`<button class="button button-secondary" data-action="close-modal">Cancel</button><button class="button button-primary" data-action="submit-${id}-key">Connect</button>`)}
+function progressModal(title,text='Starting…'){modal(title,'Keep Noor AI Studio open while this completes.',`<pre id="progress-text" class="progress-box" role="status">${esc(text)}</pre><div class="progress-track indeterminate"><i id="progress-fill"></i></div>`)}
+function planModal(plan){const p=currentProject(),ids=options();if(!ids.length){toast('Connect at least one provider first.','error');appState.route='providers';return render()}modal('Review agent run',`Project: ${p.name}`,`<div class="shared-plan-banner"><div class="provider-stack">${ids.map(id=>`<span class="provider-logo ${id}">${providerInitial(id)}</span>`).join('')}</div><div><strong>${ids.length>1?'Multi-provider collaboration available':'Single-provider run'}</strong><p>Agents execute in sequence and inherit earlier results.</p></div></div><div class="field"><label for="run-goal">Outcome</label><textarea class="input" id="run-goal" aria-describedby="run-goal-error">${esc(plan.goal)}</textarea><p class="form-error" id="run-goal-error" hidden></p></div><div class="role-assignment-list">${plan.roles.map((r,i)=>`<article><div><strong>${esc(r.role)}</strong>${badge(r.writes?'waiting':'neutral',r.writes?'May edit files':'Review only')}<p>${esc(r.purpose)}</p></div><label class="sr-only" for="role-${i}">Provider for ${esc(r.role)}</label><select class="input" id="role-${i}" data-role-provider="${esc(r.role)}">${ids.map((id,j)=>`<option value="${id}" ${j===i%ids.length?'selected':''}>${providerName(id)} · ${esc(appState.data.providers[id].model||'default')}</option>`).join('')}</select></article>`).join('')}</div>`,`<button class="button button-secondary" data-action="close-modal">Cancel</button><button class="button button-primary" data-start-run="${plan.id}">Start agent run</button>`,true);$('#modal-root').dataset.plan=JSON.stringify(plan)}
+function errorFor(id,message){const input=$(`#${id}`),e=$(`#${id}-error`);input?.setAttribute('aria-invalid','true');if(e){e.textContent=message;e.hidden=false}input?.focus()}
+function clearError(id){const input=$(`#${id}`),e=$(`#${id}-error`);input?.removeAttribute('aria-invalid');if(e)e.hidden=true}
+async function refreshState(){appState.data=await call(window.noor.app.getState(),{silent:true});render()}
+async function loadInitial(){try{[appState.data,appState.events,appState.system]=await Promise.all([call(window.noor.app.getState(),{silent:true}),call(window.noor.app.getEvents(300),{silent:true}),call(window.noor.app.systemInfo(),{silent:true})]);render()}catch(e){setPage('Unable to open Noor AI Studio','Application state could not be loaded.');$('#content').innerHTML=empty('Failed to load',e.message,'<button class="button button-primary" data-action="retry-load">Try again</button>','activity')}}
+async function handleAction(a){if(a==='close-modal')return closeModal();if(a==='retry-load')return loadInitial();if(a==='complete-onboarding'){appState.data=await call(window.noor.app.completeOnboarding());return render()}if(a==='new-project')return newProjectModal();if(a==='create-project'){const name=$('#new-project-name').value.trim();if(!name)return errorFor('new-project-name','Enter a project name.');const p=await call(window.noor.projects.create({name,goal:$('#new-project-goal').value.trim()}));closeModal();await refreshState();return openWorkspace(p.id)}if(a==='import-project'){const p=await call(window.noor.projects.import());await refreshState();return openWorkspace(p.id)}if(a==='refresh-all'){progressModal('Checking providers');try{await call(window.noor.providers.refreshAll());toast('Provider status refreshed.')}finally{closeModal();await refreshState()}return}if(a==='reload-events'){appState.events=await call(window.noor.app.getEvents(500));return render()}if(a==='codex-install'){progressModal('Installing OpenAI Codex','Downloading the official package…');try{await call(window.noor.providers.codexInstall());toast('Codex installed.')}finally{closeModal();await refreshState()}return}if(a==='codex-login'){progressModal('OpenAI Codex sign-in','Complete the official browser sign-in.');try{await call(window.noor.providers.codexLogin(false));toast('Codex connected.')}finally{closeModal();await refreshState()}return}if(a==='codex-api-key')return keyModal('codex');if(a==='gemini-connect')return keyModal('gemini');if(a==='submit-codex-key'||a==='submit-gemini-key'){const key=$('#provider-key').value.trim();if(!key)return errorFor('provider-key','Enter an API key.');const codex=a.includes('codex');progressModal(`Connecting ${codex?'OpenAI Codex':'Gemini'}`,'Validating credentials…');try{await call(codex?window.noor.providers.codexApiKey(key):window.noor.providers.geminiConnect(key));toast(`${codex?'Codex':'Gemini'} connected.`)}finally{closeModal();await refreshState()}return}if(a==='codex-logout'){await call(window.noor.providers.codexLogout());await refreshState();return toast('Codex disconnected.')}if(a==='codex-docs')return call(window.noor.providers.openUrl('codex'));if(a==='gemini-disconnect'){await call(window.noor.providers.geminiDisconnect());await refreshState();return toast('Gemini disconnected.')}if(a==='gemini-key-page')return call(window.noor.providers.openUrl('gemini'));if(a==='ollama-detect'){await call(window.noor.providers.ollamaDetect());await refreshState();return toast('Ollama status checked.')}if(a==='ollama-install'||a==='ollama-start'){progressModal(a==='ollama-install'?'Install and start Ollama':'Start Ollama','Waiting for the local service…');try{await call(a==='ollama-install'?window.noor.providers.ollamaInstall():window.noor.providers.ollamaStart());toast('Ollama is ready.')}finally{closeModal();await refreshState()}return}if(a==='ollama-download')return call(window.noor.providers.openUrl('ollama'));if(a==='ollama-pull'){modal('Download an Ollama model','The local service performs the download.','<div class="field"><label for="ollama-model">Model name</label><input class="input" id="ollama-model" value="gemma3" autofocus aria-describedby="ollama-model-error"><p class="form-error" id="ollama-model-error" hidden></p></div>','<button class="button button-secondary" data-action="close-modal">Cancel</button><button class="button button-primary" data-action="submit-ollama-pull">Download</button>');return}if(a==='submit-ollama-pull'){const m=$('#ollama-model').value.trim();if(!m)return errorFor('ollama-model','Enter a model name.');progressModal('Downloading model');try{await call(window.noor.providers.ollamaPull(m));toast('Model downloaded.')}finally{closeModal();await refreshState()}return}if(a==='new-context')return openSharedRoom(appState.sharedContextProjectId,true);if(a==='clear-context')return confirmModal('Clear Shared Room transcript?','Every message in this project room will be removed. Project files are not affected.','Clear transcript',{type:'clear-context',id:appState.sharedContext.id});if(a==='confirm-pending'){const p=appState.pendingConfirmation;if(p?.type==='clear-context'){closeModal();appState.sharedContext=await call(window.noor.contexts.clear(p.id));toast('Transcript cleared.');return renderCollaboration()}if(p?.type==='remove-project'){closeModal();await call(window.noor.projects.remove(p.id));await refreshState();return toast('Project removed. Its folder was not deleted.')}}if(a==='send-context'){const message=$('#context-message')?.value.trim(),participants=$$('[data-context-provider]:checked').map(n=>n.dataset.contextProvider),rounds=Number($('#context-rounds').value);if(!message)return errorFor('context-message','Write a message for the providers.');if(!participants.length)return errorFor('context-message','Select at least one provider.');appState.contextParticipants=participants;appState.contextRounds=rounds;appState.contextBusy=true;appState.contextStatus=`Starting ${participants.map(providerName).join(', ')} · round 1 of ${rounds}`;renderCollaboration();try{appState.sharedContext=await call(window.noor.contexts.send({projectId:appState.sharedContextProjectId,contextId:appState.sharedContext?.id,message,participants,rounds}));appState.contextStatus='All providers contributed.';toast('Shared conversation completed.')}finally{appState.contextBusy=false;renderCollaboration()}return}if(a==='plan-run'){const p=currentProject();modal('Describe the outcome',`Project: ${p.name}`,`<div class="field"><label for="plan-goal">What should agents build or change?</label><textarea class="input" id="plan-goal" autofocus aria-describedby="plan-goal-error">${esc(p.goal||'')}</textarea><p class="form-error" id="plan-goal-error" hidden></p></div>`,'<button class="button button-secondary" data-action="close-modal">Cancel</button><button class="button button-primary" data-action="create-plan">Review plan</button>');return}if(a==='create-plan'){const goal=$('#plan-goal').value.trim();if(!goal)return errorFor('plan-goal','Describe the outcome.');return planModal(await call(window.noor.orchestrator.plan(goal)))}if(a==='reload-files'){appState.files=await call(window.noor.projects.listFiles(appState.currentProjectId));return renderWorkspace()}if(a==='save-file'){await call(window.noor.projects.saveFile(appState.currentProjectId,appState.currentFile,$('#editor').value));appState.fileContent=$('#editor').value;return toast('File saved.')}if(a==='run-safe-command'){const c=$('#safe-command')?.value;if(!c)return toast('Choose a command.','error');await call(window.noor.tools.safeCommand(appState.currentProjectId,c));return toast(`${c} started.`)}if(a==='clear-terminal'){appState.terminal[appState.currentProjectId]='';return renderWorkspace()}if(a==='restore-backup'){const r=await call(window.noor.tools.restore());return toast(`Restored ${r.restored.length} files.`)}if(a==='save-settings'){const ownerLabel=$('#owner-label').value.trim(),maxAgents=Number($('#max-agents').value);if(!ownerLabel)return errorFor('owner-label','Enter a display label.');if(!Number.isInteger(maxAgents)||maxAgents<1||maxAgents>6)return errorFor('max-agents','Choose 1 to 6.');appState.data=await call(window.noor.app.updateSettings({ownerLabel,defaultProvider:$('#default-provider').value,maxAgents,sharedContextRounds:Number($('#shared-rounds').value)}));render();return toast('Settings saved.')}if(a==='export-diagnostics'){const f=await call(window.noor.tools.exportDiagnostics());return toast(`Diagnostics saved to ${f}`)}}
+async function openProjectView(v){const p=currentProject()||projectById(appState.sharedContextProjectId);if(!p)return;if(v==='shared-room')return openSharedRoom(p.id);appState.currentProjectId=p.id;appState.route='workspace';appState.projectView=v;if(!appState.files.length)try{appState.files=await call(window.noor.projects.listFiles(p.id))}catch(e){console.error(e)}render()}
+document.addEventListener('click',async e=>{const el=e.target.closest('button,[data-file]');if(!el)return;try{if(el.dataset.route){if(!appState.data?.onboardingComplete&&el.dataset.route!=='providers')return;appState.route=el.dataset.route;if(el.dataset.route==='collaboration'){appState.sharedContextProjectId=null;appState.sharedContext=null}return render()}if(el.dataset.projectView)return openProjectView(el.dataset.projectView);if(el.dataset.contextPrompt){$('#context-message').value=el.dataset.contextPrompt;return $('#context-message').focus()}if(el.dataset.action)return await handleAction(el.dataset.action);if(el.dataset.openProject)return openWorkspace(el.dataset.openProject);if(el.dataset.openContext)return openSharedRoom(el.dataset.openContext);if(el.dataset.openRun){appState.selectedRunId=el.dataset.openRun;appState.route='runs';return render()}if(el.dataset.openProjectRun){appState.selectedRunId=el.dataset.openProjectRun;return renderWorkspace()}if(el.dataset.openFolder)return call(window.noor.projects.openFolder(el.dataset.openFolder));if(el.dataset.removeProject){const p=projectById(el.dataset.removeProject);return confirmModal('Remove project?',`${p?.name||'This project'} will leave Noor navigation. Its folder remains untouched.`,'Remove project',{type:'remove-project',id:el.dataset.removeProject})}if(el.dataset.backup){const r=await call(window.noor.tools.backup(el.dataset.backup));return toast(`Backup created with ${r.files} files.`)}if(el.dataset.preview){const r=await call(window.noor.tools.previewStart(el.dataset.preview));return toast(r.message)}if(el.dataset.cancelRun){await call(window.noor.orchestrator.cancel(el.dataset.cancelRun));return toast('Cancellation requested.')}if(el.dataset.handoff){const p=projectById(el.dataset.handoff),r=await call(window.noor.tools.handoff({projectId:p.id,goal:p.goal}));return toast(`Handoff created at ${r.file}`)}if(el.dataset.file){const d=await call(window.noor.projects.readFile(appState.currentProjectId,el.dataset.file));appState.currentFile=d.path;appState.fileContent=d.content;return renderWorkspace()}if(el.dataset.startRun){const plan=JSON.parse($('#modal-root').dataset.plan||'{}'),goal=$('#run-goal').value.trim();if(!goal)return errorFor('run-goal','Describe the outcome.');const assignments={};$$('[data-role-provider]').forEach(s=>assignments[s.dataset.roleProvider]={provider:s.value});const participants=[...new Set(Object.values(assignments).map(x=>x.provider))],contextId=appState.sharedContext?.projectId===appState.currentProjectId?appState.sharedContext.id:null;closeModal();toast(`Agent run started with ${participants.map(providerName).join(', ')}.`);window.noor.orchestrator.run({projectId:appState.currentProjectId,goal,participants,assignments,contextId,plan}).then(async r=>{if(!r.ok)toast(r.error,'error');else toast('Agent run completed.');await refreshState()}).catch(err=>{console.error(err);toast(err.message,'error')})}}catch(err){console.error(err)}});
+document.addEventListener('change',async e=>{const s=e.target.closest('[data-provider-model]');if(s)try{await call(window.noor.providers.setModel(s.dataset.providerModel,s.value));await refreshState();toast('Default model updated.')}catch(err){console.error(err)}});
+document.addEventListener('input',e=>{if(e.target.id&&e.target.hasAttribute('aria-invalid'))clearError(e.target.id)});
+window.noor.events.onStateChanged(s=>{appState.data=s;render()});window.noor.events.onRunUpdated(r=>{const i=appState.data.runs.findIndex(x=>x.id===r.id);if(i>=0)appState.data.runs[i]=r;else appState.data.runs.unshift(r);if(['workspace','runs','home'].includes(appState.route))render()});window.noor.events.onActivity(e=>{appState.events.unshift(e);if(appState.route==='activity'||appState.projectView==='history')render()});window.noor.events.onProviderProgress(p=>{const t=$('#progress-text'),f=$('#progress-fill');if(t){t.textContent+=`\n${p.status||''}`;t.scrollTop=t.scrollHeight}if(f&&Number.isFinite(p.percent)){f.parentElement.classList.remove('indeterminate');f.style.width=`${Math.max(0,Math.min(100,p.percent))}%`}});window.noor.events.onTerminal(({projectId,text})=>{appState.terminal[projectId]=(appState.terminal[projectId]||'')+text;if(appState.terminal[projectId].length>60000)appState.terminal[projectId]=appState.terminal[projectId].slice(-60000);const t=$('#terminal-output');if(t&&appState.currentProjectId===projectId){t.textContent=appState.terminal[projectId];t.scrollTop=t.scrollHeight}});window.noor.events.onContextMessage(({contextId,message})=>{if(!appState.sharedContext||appState.sharedContext.id!==contextId)return;if(!appState.sharedContext.messages.some(x=>x.id===message.id))appState.sharedContext.messages.push(message);appState.sharedContext.messageCount=appState.sharedContext.messages.length;if(appState.route==='collaboration')renderCollaboration()});window.noor.events.onContextProgress(p=>{if(appState.sharedContext&&p.contextId===appState.sharedContext.id){appState.contextStatus=p.status||`${providerName(p.provider)} is working…`;if(appState.route==='collaboration')renderCollaboration()}});
+document.addEventListener('keydown',e=>{if(e.key==='Enter'&&(e.ctrlKey||e.metaKey)&&e.target?.id==='context-message'&&!appState.contextBusy){e.preventDefault();$('[data-action="send-context"]')?.click();return}const m=$('#modal-root .modal');if(!m)return;if(e.key==='Escape'){e.preventDefault();return closeModal()}if(e.key==='Tab'){const f=$$('button:not([disabled]),input:not([disabled]),textarea:not([disabled]),select:not([disabled])',m);if(e.shiftKey&&document.activeElement===f[0]){e.preventDefault();f.at(-1)?.focus()}else if(!e.shiftKey&&document.activeElement===f.at(-1)){e.preventDefault();f[0]?.focus()}}});
 
-const $ = (selector, root = document) => root.querySelector(selector);
-const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
-const esc = (value = '') => String(value).replace(/[&<>'"]/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[char]));
-const date = (value) => value ? new Date(value).toLocaleString() : 'Never';
-const shortDate = (value) => value ? new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
-
-async function call(promise, options = {}) {
-  const result = await promise;
-  if (!result?.ok) {
-    const message = result?.error || 'The operation failed.';
-    if (!options.silent) toast(message, 'error');
-    throw new Error(message);
+document.addEventListener('click',async event=>{
+  const deleteButton=event.target.closest('[data-delete-run]');
+  if(deleteButton){
+    const run=appState.data.runs.find(item=>item.id===deleteButton.dataset.deleteRun);
+    return confirmModal('Delete this agent run?',`The run “${run?.goal||'Selected run'}” and its saved report will be removed from Noor. Project files and Shared Room messages are not affected.`,'Delete run',{type:'delete-run',id:deleteButton.dataset.deleteRun});
   }
-  return result.data;
-}
-
-function toast(message, type = 'success') {
-  const node = document.createElement('div');
-  node.className = `toast ${type}`;
-  node.textContent = message;
-  $('#toast-root').appendChild(node);
-  setTimeout(() => node.remove(), 4200);
-}
-
-function statusBadge(connected, connectedText = 'Connected', missingText = 'Not connected') {
-  return `<span class="badge ${connected ? 'success' : 'warning'}">${connected ? '●' : '○'} ${esc(connected ? connectedText : missingText)}</span>`;
-}
-
-function setPage(title, subtitle, actions = '') {
-  $('#page-title').textContent = title;
-  $('#page-subtitle').textContent = subtitle;
-  $('#top-actions').innerHTML = actions;
-}
-
-function currentProject() {
-  return appState.data?.projects.find((p) => p.id === appState.currentProjectId) || null;
-}
-
-function connectedProviderCount() {
-  const p = appState.data?.providers;
-  if (!p) return 0;
-  return Number(p.codex.connected) + Number(p.gemini.connected) + Number(p.ollama.connected);
-}
-
-function renderNav() {
-  const items = [
-    ['home', '⌂', 'Home', ''],
-    ['projects', '▣', 'Projects', appState.data?.projects.length || ''],
-    ['providers', '◈', 'Providers', connectedProviderCount() || ''],
-    ['collaboration', '✦', 'Shared Room', appState.sharedContext?.messageCount || ''],
-    ['agents', '◎', 'Agents', (appState.data?.runs || []).filter((r) => r.status === 'running').length || ''],
-    ['activity', '≋', 'Activity', ''],
-    ['backups', '↻', 'Backups', ''],
-    ['settings', '⚙', 'Settings', '']
-  ];
-  $('#nav').innerHTML = items.map(([route, icon, label, count]) => `
-    <button class="nav-button ${appState.route === route ? 'active' : ''}" data-route="${route}">
-      <span class="nav-icon">${icon}</span><span>${label}</span>${count ? `<span class="nav-count">${count}</span>` : ''}
-    </button>`).join('');
-  const good = connectedProviderCount() > 0;
-  $('#footer-health').innerHTML = `<span class="status-dot ${good ? 'good' : ''}"></span><span>${good ? `${connectedProviderCount()} provider${connectedProviderCount() === 1 ? '' : 's'} ready` : 'No provider connected'}</span>`;
-}
-
-function render() {
-  renderNav();
-  if (!appState.data?.onboardingComplete) return renderOnboarding();
-  const routes = { home: renderHome, projects: renderProjects, providers: renderProviders, collaboration: renderCollaboration, agents: renderAgents, activity: renderActivity, backups: renderBackups, settings: renderSettings, workspace: renderWorkspace };
-  (routes[appState.route] || renderHome)();
-}
-
-function renderOnboarding() {
-  setPage('Set up Noor AI Studio', 'A local-first workspace for one owner', '');
-  const checks = [
-    ['Operating system', `${appState.system?.platform || 'Checking'} ${appState.system?.arch || ''}`, true],
-    ['Local storage', appState.system?.userData || 'Checking app-data directory…', Boolean(appState.system?.userData)],
-    ['Secret encryption', appState.system?.encryptionAvailable ? 'OS encryption is available' : 'Encryption unavailable', Boolean(appState.system?.encryptionAvailable)],
-    ['Provider access', connectedProviderCount() ? `${connectedProviderCount()} provider(s) connected` : 'You can connect providers after setup', true]
-  ];
-  $('#content').innerHTML = `
-    <div class="onboarding">
-      <span class="badge info">Windows-first • local-only state</span>
-      <h2>Your local AI development workspace</h2>
-      <p>Create or open a project, describe the result, and supervise specialized agents without manually juggling terminals. Provider limits still apply because even software cannot repeal billing departments.</p>
-      <div class="check-list">
-        ${checks.map(([label, value, ok]) => `<div class="check-item"><div><strong>${esc(label)}</strong><span>${esc(value)}</span></div><span class="badge ${ok ? 'success' : 'danger'}">${ok ? 'Ready' : 'Needs attention'}</span></div>`).join('')}
-      </div>
-      <div class="card">
-        <div class="card-header"><div><h2>What this build includes</h2><p>A shared local transcript for Codex, Gemini, and Ollama, plus encrypted secrets, project files, collaborative agent runs, safe commands, backups, and manual Antigravity handoff.</p></div></div>
-        <div class="row-actions"><button class="primary" data-action="complete-onboarding">Set up AI Studio</button><button class="secondary" data-route="providers">Review providers</button></div>
-      </div>
-    </div>`;
-}
-
-function renderHome() {
-  setPage('Home', 'Your local AI development control room', `<button class="secondary" data-action="import-project">Open existing folder</button><button class="primary" data-action="new-project">New Project</button>`);
-  const projects = appState.data.projects.slice(0, 5);
-  const runs = appState.data.runs.slice(0, 5);
-  const interrupted = runs.filter((r) => ['failed', 'cancelled'].includes(r.status)).length;
-  $('#content').innerHTML = `
-    <div class="hero">
-      <div><span class="badge info">Single owner • local state</span><h2>Build with agents without turning your desktop into a command-line archaeological site.</h2><p>Connect Codex, Gemini, and Ollama, then let them read one project context, debate decisions, and divide specialist work from one workspace.</p></div>
-      <div class="hero-actions"><button class="secondary" data-route="providers">Connect provider</button><button class="primary" data-action="new-project">Start a project</button></div>
-    </div>
-    <div class="grid cols-4 section">
-      <div class="card"><div class="metric-label">Projects</div><div class="metric">${appState.data.projects.length}</div><p>Folders registered locally.</p></div>
-      <div class="card"><div class="metric-label">Providers ready</div><div class="metric">${connectedProviderCount()}</div><p>Verified, not merely decorated with optimistic dots.</p></div>
-      <div class="card"><div class="metric-label">Agent runs</div><div class="metric">${appState.data.runs.length}</div><p>Persisted on this computer.</p></div>
-      <div class="card"><div class="metric-label">Needs review</div><div class="metric">${interrupted}</div><p>Failed or cancelled recent runs.</p></div>
-    </div>
-    <div class="grid cols-2 section">
-      <div>
-        <div class="section-heading"><div><h2>Recent projects</h2><p>Open a workspace or reveal its folder.</p></div><button class="ghost small" data-route="projects">View all</button></div>
-        <div class="card">${projects.length ? `<div class="list">${projects.map(projectRow).join('')}</div>` : emptyState('No projects yet', 'Create a blank project or import an existing folder.', '<button class="primary small" data-action="new-project">New Project</button>')}</div>
-      </div>
-      <div>
-        <div class="section-heading"><div><h2>Recent runs</h2><p>Agent activity and completion state.</p></div><button class="ghost small" data-route="agents">View all</button></div>
-        <div class="card">${runs.length ? `<div class="list">${runs.map(runRow).join('')}</div>` : emptyState('No agent runs', 'Runs appear after you start a reviewed plan.')}</div>
-      </div>
-    </div>`;
-}
-
-function emptyState(title, text, action = '') {
-  return `<div class="empty"><strong>${esc(title)}</strong><span>${esc(text)}</span>${action ? `<div class="row-actions" style="justify-content:center;margin-top:14px">${action}</div>` : ''}</div>`;
-}
-
-function projectRow(project) {
-  return `<div class="list-row"><div class="list-row-main"><strong>${esc(project.name)}</strong><span>${esc(project.path)} • Last activity ${date(project.lastActivity)}</span></div><div class="row-actions"><button class="ghost small" data-open-folder="${project.id}">Folder</button><button class="secondary small" data-open-project="${project.id}">Open</button></div></div>`;
-}
-
-function runRow(run) {
-  const cls = run.status === 'completed' ? 'success' : run.status === 'running' ? 'info' : run.status === 'failed' ? 'danger' : 'warning';
-  const project = appState.data.projects.find((p) => p.id === run.projectId);
-  return `<div class="list-row"><div class="list-row-main"><strong>${esc(run.goal)}</strong><span>${esc(project?.name || 'Unknown project')} • ${esc((run.providers || [run.provider]).join(' + '))} • ${date(run.startedAt)}</span></div><span class="badge ${cls}">${esc(run.status)}</span></div>`;
-}
-
-function renderProjects() {
-  setPage('Projects', 'Local folders registered with Noor AI Studio', `<button class="secondary" data-action="import-project">Import Folder</button><button class="primary" data-action="new-project">New Project</button>`);
-  $('#content').innerHTML = `<div class="card">${appState.data.projects.length ? `<div class="list">${appState.data.projects.map((p) => `<div class="list-row"><div class="list-row-main"><strong>${esc(p.name)}</strong><span>${esc(p.path)}${p.goal ? ` • ${esc(p.goal)}` : ''}</span></div><div class="row-actions"><button class="ghost small" data-backup="${p.id}">Backup</button><button class="ghost small" data-open-folder="${p.id}">Folder</button><button class="secondary small" data-open-project="${p.id}">Open workspace</button><button class="danger-button small" data-remove-project="${p.id}">Remove</button></div></div>`).join('')}</div>` : emptyState('No projects registered', 'Import an existing folder or create a new local project.', '<button class="primary small" data-action="new-project">Create project</button>')}</div>`;
-}
-
-function providerCard(id, title, label, description, provider, actions, logo) {
-  const connected = provider.connected;
-  const models = provider.models || [];
-  return `<div class="card provider-card">
-    <div class="card-header"><div class="provider-title"><div class="provider-logo">${logo}</div><div><h2>${title}</h2><span class="badge info">${label}</span></div></div>${statusBadge(connected, 'Connected', provider.installed ? 'Installed' : 'Not connected')}</div>
-    <p>${description}</p>
-    <div class="provider-meta">
-      <div class="meta-line"><span>Status</span><strong>${esc(provider.detail || (connected ? 'Verified' : 'Not verified'))}</strong></div>
-      <div class="meta-line"><span>Model</span><strong>${esc(provider.model || 'Not selected')}</strong></div>
-      <div class="meta-line"><span>Last check</span><strong>${date(provider.lastCheck)}</strong></div>
-    </div>
-    ${models.length ? `<div class="field"><label>Default model</label><select class="input" data-provider-model="${id}">${models.map((m) => `<option value="${esc(m.id)}" ${m.id === provider.model ? 'selected' : ''}>${esc(m.name || m.id)}</option>`).join('')}</select></div>` : ''}
-    <div class="row-actions">${actions}</div>
-  </div>`;
-}
-
-function renderProviders() {
-  setPage('Providers', 'Only verified connections are shown as connected', `<button class="secondary" data-action="refresh-all">Refresh all</button>`);
-  const p = appState.data.providers;
-  $('#content').innerHTML = `
-    <div class="grid cols-2">
-      ${providerCard('codex', 'OpenAI Codex', 'Automatic', 'Uses the official Codex CLI. Sign in with ChatGPT in the browser or use an API key through Codex.', p.codex, `${!p.codex.installed ? '<button class="primary" data-action="codex-install">Install automatically</button>' : p.codex.connected ? '<button class="danger-button" data-action="codex-logout">Disconnect</button>' : '<button class="primary" data-action="codex-login">Sign in with ChatGPT</button><button class="secondary" data-action="codex-api-key">Use API key</button>'}<button class="ghost" data-action="codex-docs">Official docs</button>`, 'O')}
-      ${providerCard('gemini', 'Gemini API', 'API credential', 'Validates a Google AI Studio key, encrypts it with the operating system, and discovers compatible models dynamically.', p.gemini, `${p.gemini.connected ? '<button class="danger-button" data-action="gemini-disconnect">Disconnect</button>' : '<button class="primary" data-action="gemini-connect">Connect Gemini API</button>'}<button class="ghost" data-action="gemini-key-page">Open key page</button>`, 'G')}
-      ${providerCard('ollama', 'Ollama Local Models', 'Runs on this PC', 'Installs the official signed Windows build, starts the localhost service, and downloads local models with visible progress.', p.ollama, `${!p.ollama.installed ? '<button class="primary" data-action="ollama-install">Install & start</button>' : !p.ollama.connected ? '<button class="primary" data-action="ollama-start">Start local service</button><button class="secondary" data-action="ollama-detect">Check again</button>' : '<button class="secondary" data-action="ollama-detect">Check service</button><button class="primary" data-action="ollama-pull">Download model</button>'}<button class="ghost" data-action="ollama-download">Official page</button>`, 'L')}
-      <div class="card provider-card"><div class="card-header"><div class="provider-title"><div class="provider-logo">A</div><div><h2>Antigravity</h2><span class="badge warning">Manual Handoff</span></div></div><span class="badge success">Available</span></div><p>Creates a task packet, copies the prompt, and opens the project folder. It never borrows cached Antigravity credentials or pretends a manual handoff is an automatic provider.</p><div class="provider-meta"><div class="meta-line"><span>Mode</span><strong>Manual handoff only</strong></div><div class="meta-line"><span>Credential access</span><strong>None</strong></div></div><button class="secondary" data-route="projects">Choose a project</button></div>
-    </div>`;
-}
-
-
-function providerName(id) {
-  return { codex: 'OpenAI Codex', gemini: 'Gemini', ollama: 'Ollama', user: 'Noor', system: 'System' }[id] || id;
-}
-
-function providerInitial(id) {
-  return { codex: 'O', gemini: 'G', ollama: 'L', user: 'N', system: '!' }[id] || '?';
-}
-
-function connectedParticipantOptions() {
-  const providers = appState.data?.providers || {};
-  return [
-    providers.codex?.connected && ['codex', 'OpenAI Codex'],
-    providers.gemini?.connected && ['gemini', 'Gemini API'],
-    providers.ollama?.connected && ['ollama', 'Ollama Local']
-  ].filter(Boolean);
-}
-
-async function openSharedRoom(projectId, createNew = false) {
-  const target = projectId || appState.sharedContextProjectId || appState.currentProjectId || appState.data?.projects?.[0]?.id;
-  if (!target) { appState.route = 'collaboration'; appState.sharedContext = null; return render(); }
-  if (appState.sharedContextProjectId !== target) {
-    appState.contextParticipants = null;
-    appState.contextRounds = null;
+  if(event.target.closest('[data-reset-app]')){
+    appState.previousFocus=document.activeElement;
+    return modal('Delete all application data','This action cannot be undone inside Noor AI Studio.',`<div class="reset-confirm">${notice('error','Application data will be erased','Projects will be unregistered and all runs, activity, settings, transcripts, and saved credentials will be deleted. Project folders and provider installations remain untouched.')}<div class="field"><label for="reset-confirmation">Type DELETE to confirm</label><input class="input" id="reset-confirmation" autocomplete="off" autofocus></div></div>`,`<button class="button button-secondary" data-action="close-modal">Cancel</button><button class="button button-danger" data-confirm-reset disabled>Delete all data</button>`);
   }
-  appState.sharedContextProjectId = target;
-  if (createNew) appState.sharedContext = null;
-  appState.route = 'collaboration';
-  appState.contextStatus = 'Loading the shared transcript…';
-  render();
-  try {
-    appState.sharedContext = await call(createNew ? window.noor.contexts.create(target) : window.noor.contexts.getOrCreate(target), { silent: true });
-    appState.contextStatus = '';
-  } catch (error) {
-    appState.contextStatus = error.message;
+  if(event.target.closest('[data-action="confirm-pending"]')&&appState.pendingConfirmation?.type==='delete-run'){
+    const id=appState.pendingConfirmation.id;closeModal();appState.selectedRunId=null;appState.data=await call(window.noor.orchestrator.deleteRun(id));render();return toast('Agent run deleted.');
   }
-  render();
-}
-
-function contextMessageCard(message) {
-  const provider = message.provider || 'system';
-  const title = provider === 'user' ? 'Noor' : providerName(provider);
-  const details = [message.role, message.model, message.round ? `Round ${message.round}` : null].filter(Boolean).join(' • ');
-  return `<article class="context-message ${esc(provider)} ${message.kind === 'error' ? 'error' : ''}">
-    <div class="context-avatar">${providerInitial(provider)}</div>
-    <div class="context-bubble"><div class="context-message-head"><div><strong>${esc(title)}</strong>${details ? `<span>${esc(details)}</span>` : ''}</div><time>${shortDate(message.at)}</time></div><div class="context-copy">${esc(message.content).replace(/\n/g, '<br>')}</div></div>
-  </article>`;
-}
-
-function renderCollaboration() {
-  setPage('Shared Room', 'One canonical context for Codex, Gemini, Ollama, and you', `<button class="secondary" data-action="new-context">New room</button>`);
-  const projects = appState.data.projects || [];
-  if (!projects.length) {
-    $('#content').innerHTML = emptyState('Create or import a project first', 'Shared context is project-scoped so every model sees the correct files.', '<button class="primary" data-action="new-project">New Project</button>');
-    return;
-  }
-  const projectId = appState.sharedContextProjectId || projects[0].id;
-  const options = connectedParticipantOptions();
-  const context = appState.sharedContext?.projectId === projectId ? appState.sharedContext : null;
-  const messages = context?.messages || [];
-  const preferred = appState.contextParticipants || appState.data.settings.defaultParticipants || ['codex', 'gemini', 'ollama'];
-  const selectedRounds = Number(appState.contextRounds || appState.data.settings.sharedContextRounds || 1);
-  $('#content').innerHTML = `<div class="room-shell">
-    <aside class="room-sidebar card">
-      <span class="eyebrow">Project context</span>
-      <select class="input" id="context-project">${projects.map((project) => `<option value="${project.id}" ${project.id === projectId ? 'selected' : ''}>${esc(project.name)}</option>`).join('')}</select>
-      <div class="room-explainer"><strong>How this works</strong><p>Each selected backend reads the same local transcript. Responses are appended in order, so the next model can agree, challenge, or improve the previous answer.</p></div>
-      <div class="participant-list">
-        <span class="eyebrow">Participants</span>
-        ${['codex', 'gemini', 'ollama'].map((id) => {
-          const provider = appState.data.providers[id];
-          const ready = Boolean(provider?.connected);
-          return `<label class="participant ${ready ? 'ready' : 'offline'}"><input type="checkbox" data-context-provider="${id}" ${ready && preferred.includes(id) ? 'checked' : ''} ${ready ? '' : 'disabled'} /><span class="participant-mark ${id}">${providerInitial(id)}</span><span><strong>${esc(providerName(id))}</strong><small>${ready ? esc(provider.model || 'Provider default') : 'Not connected'}</small></span><span class="participant-state">${ready ? 'Ready' : 'Offline'}</span></label>`;
-        }).join('')}
-      </div>
-      <div class="field"><label>Conversation depth</label><select class="input" id="context-rounds"><option value="1" ${selectedRounds === 1 ? 'selected' : ''}>1 round • quick collaboration</option><option value="2" ${selectedRounds === 2 ? 'selected' : ''}>2 rounds • rebut and refine</option></select></div>
-      <button class="ghost" data-action="clear-context" ${context?.messageCount ? '' : 'disabled'}>Clear this room</button>
-    </aside>
-    <section class="room-main card">
-      <div class="room-header"><div><span class="live-pill"><i></i> Shared local memory</span><h2>${esc(context?.title || 'Preparing shared room')}</h2><p>${context ? `${context.messageCount} message${context.messageCount === 1 ? '' : 's'} • stored locally` : 'Creating a project-scoped transcript…'}</p></div><div class="provider-stack">${options.map(([id]) => `<span class="stack-icon ${id}" title="${esc(providerName(id))}">${providerInitial(id)}</span>`).join('')}</div></div>
-      <div class="context-feed" id="context-feed">${messages.length ? messages.map(contextMessageCard).join('') : `<div class="room-empty"><div class="room-orbit"><span>O</span><span>G</span><span>L</span></div><h3>Start the model conversation</h3><p>Ask for a plan, architecture debate, code review, debugging diagnosis, or a decision. The models will see and respond to each other.</p></div>`}</div>
-      <div class="context-status ${appState.contextBusy ? 'busy' : ''}">${esc(appState.contextStatus || (appState.contextBusy ? 'The team is working through the shared transcript…' : 'Ready'))}</div>
-      <div class="context-composer"><textarea class="input" id="context-message" placeholder="Ask the team to discuss, compare approaches, or solve something together…" ${appState.contextBusy ? 'disabled' : ''}></textarea><div class="composer-footer"><span>Enter your request once. Every selected model receives the same context.</span><button class="primary" data-action="send-context" ${appState.contextBusy || !context || !options.length ? 'disabled' : ''}>${appState.contextBusy ? 'Team working…' : 'Send to team'}</button></div></div>
-    </section>
-  </div>`;
-  requestAnimationFrame(() => { const feed = $('#context-feed'); if (feed) feed.scrollTop = feed.scrollHeight; });
-}
-
-function renderAgents() {
-  setPage('Agents', 'Runs and specialist status are persisted locally', '');
-  const runs = appState.data.runs;
-  $('#content').innerHTML = runs.length ? `<div class="grid">${runs.map((run) => {
-    const project = appState.data.projects.find((p) => p.id === run.projectId);
-    return `<div class="card"><div class="card-header"><div><h2>${esc(run.goal)}</h2><p>${esc(project?.name || 'Unknown project')} • ${esc((run.providers || [run.provider]).join(' + '))} • ${date(run.startedAt)}</p></div><span class="badge ${run.status === 'completed' ? 'success' : run.status === 'running' ? 'info' : 'danger'}">${esc(run.status)}</span></div><div class="agent-list">${run.agents.map(agentCard).join('')}</div>${run.finalSummary ? `<details class="section"><summary>Completion report</summary><pre class="progress-box">${esc(run.finalSummary)}</pre></details>` : ''}${run.status === 'running' ? `<div class="row-actions section"><button class="danger-button" data-cancel-run="${run.id}">Stop run</button></div>` : ''}</div>`;
-  }).join('')}</div>` : emptyState('No agents yet', 'Create a project and start a reviewed plan.');
-}
-
-function agentCard(agent) {
-  const cls = agent.status === 'completed' ? 'success' : agent.status === 'running' ? 'info' : agent.status === 'failed' ? 'danger' : 'warning';
-  return `<div class="agent-card"><div class="top"><div><strong>${esc(agent.role)}</strong><span class="provider-mini ${esc(agent.provider || 'system')}">${esc(agent.provider || 'unassigned')}</span></div><span class="badge ${cls}">${esc(agent.status)}</span></div><p>${esc(agent.summary || agent.purpose || 'Waiting')}</p>${agent.files?.length ? `<p>Files: ${esc(agent.files.join(', '))}</p>` : ''}</div>`;
-}
-
-function renderActivity() {
-  setPage('Activity', 'Sanitized local event journal', `<button class="secondary" data-action="reload-events">Reload</button>`);
-  $('#content').innerHTML = `<div class="card">${appState.events.length ? `<div class="timeline">${appState.events.map(eventRow).join('')}</div>` : emptyState('No activity recorded', 'Provider checks, file saves, and agent runs appear here.')}</div>`;
-}
-
-function eventRow(event) {
-  return `<div class="event"><span class="event-dot ${esc(event.level)}"></span><div class="event-message"><strong>${esc(event.message)}</strong>${event.role ? `<div class="help">${esc(event.role)}</div>` : ''}</div><span class="event-time">${shortDate(event.at)}</span></div>`;
-}
-
-function renderBackups() {
-  setPage('Backups', 'Portable compressed project archives', `<button class="primary" data-action="restore-backup">Restore backup</button>`);
-  $('#content').innerHTML = `<div class="card"><div class="card-header"><div><h2>Create a project backup</h2><p>Backups include project files while excluding .git, node_modules, build output, and Noor internal state.</p></div></div>${appState.data.projects.length ? `<div class="list">${appState.data.projects.map((p) => `<div class="list-row"><div class="list-row-main"><strong>${esc(p.name)}</strong><span>${esc(p.path)}</span></div><button class="primary small" data-backup="${p.id}">Create backup</button></div>`).join('')}</div>` : emptyState('No project to back up', 'Register a project first.')}</div>`;
-}
-
-function renderSettings() {
-  const s = appState.data.settings;
-  setPage('Settings', 'Local preferences and diagnostics', `<button class="secondary" data-action="export-diagnostics">Export diagnostics</button>`);
-  $('#content').innerHTML = `<div class="grid cols-2"><div class="card"><h2>General</h2><div class="field section"><label>Owner label</label><input class="input" id="owner-label" value="${esc(s.ownerLabel || 'Noor')}" /></div><div class="field"><label>Default provider</label><select class="input" id="default-provider"><option value="codex" ${s.defaultProvider === 'codex' ? 'selected' : ''}>OpenAI Codex</option><option value="gemini" ${s.defaultProvider === 'gemini' ? 'selected' : ''}>Gemini API</option><option value="ollama" ${s.defaultProvider === 'ollama' ? 'selected' : ''}>Ollama</option></select></div><div class="field"><label>Maximum planned agents</label><input class="input" id="max-agents" type="number" min="1" max="6" value="${Number(s.maxAgents || 4)}" /></div><div class="field"><label>Shared Room response rounds</label><select class="input" id="shared-rounds"><option value="1" ${Number(s.sharedContextRounds || 1) === 1 ? 'selected' : ''}>1 round • faster</option><option value="2" ${Number(s.sharedContextRounds || 1) === 2 ? 'selected' : ''}>2 rounds • models can rebut</option></select></div><button class="primary" data-action="save-settings">Save settings</button></div><div class="card"><h2>System</h2><div class="provider-meta section"><div class="meta-line"><span>Platform</span><strong>${esc(appState.system?.platform)} ${esc(appState.system?.arch)}</strong></div><div class="meta-line"><span>Memory</span><strong>${esc(appState.system?.memoryGb)} GB</strong></div><div class="meta-line"><span>Encrypted secrets</span><strong>${appState.system?.encryptionAvailable ? 'Available' : 'Unavailable'}</strong></div><div class="meta-line"><span>App data</span><strong>${esc(appState.system?.userData)}</strong></div></div><p>Diagnostics deliberately exclude stored API keys and raw Codex credentials.</p></div></div>`;
-}
-
-async function openWorkspace(projectId) {
-  appState.currentProjectId = projectId;
-  appState.route = 'workspace';
-  appState.currentFile = null;
-  appState.fileContent = '';
-  try { appState.files = await call(window.noor.projects.listFiles(projectId)); } catch { appState.files = []; }
-  render();
-}
-
-function renderWorkspace() {
-  const project = currentProject();
-  if (!project) { appState.route = 'projects'; return renderProjects(); }
-  const recentRun = appState.data.runs.find((r) => r.projectId === project.id);
-  setPage(project.name, project.path, `<button class="ghost" data-open-folder="${project.id}">Open folder</button><button class="secondary" data-preview="${project.id}">Preview</button><button class="primary" data-action="plan-run">New agent run</button>`);
-  const terminal = appState.terminal[project.id] || 'Safe command output appears here.\n';
-  const files = appState.files.filter((f) => f.type === 'file');
-  $('#content').innerHTML = `<div class="workspace">
-    <div class="panel"><div class="panel-header"><strong>Explorer</strong><button class="ghost small" data-action="reload-files">Refresh</button></div><div class="panel-body"><div class="file-tree">${files.length ? files.map((f) => `<button class="file-item ${appState.currentFile === f.path ? 'active' : ''}" data-file="${esc(f.path)}">${esc(f.path)}</button>`).join('') : '<div class="help">This project has no readable files yet.</div>'}</div></div></div>
-    <div class="panel"><div class="panel-header"><strong>${esc(appState.currentFile || 'Project workspace')}</strong><div class="row-actions">${appState.currentFile ? '<button class="primary small" data-action="save-file">Save file</button>' : ''}<button class="ghost small" data-validate="${project.id}">Run validation</button></div></div>${appState.currentFile ? `<div class="editor-wrap"><textarea id="editor" class="editor" spellcheck="false">${esc(appState.fileContent)}</textarea></div>` : `<div class="panel-body">${emptyState('Select a file', 'Use the explorer to open a text file, or start an agent run to build the project.', '<button class="primary small" data-action="plan-run">Plan agent run</button>')}</div>`}<div class="terminal" id="terminal-output">${esc(terminal)}</div><div class="command-row"><select class="input" id="safe-command"><option>git status</option><option>git diff</option><option>npm test</option><option>npm run build</option><option>npm run lint</option></select><button class="secondary small" data-action="run-safe-command">Run safe command</button></div></div>
-    <div class="panel"><div class="panel-header"><strong>Agents & tasks</strong>${recentRun ? `<span class="badge ${recentRun.status === 'completed' ? 'success' : recentRun.status === 'running' ? 'info' : 'danger'}">${esc(recentRun.status)}</span>` : ''}</div><div class="panel-body">${recentRun ? `<div class="agent-list">${recentRun.agents.map(agentCard).join('')}</div>${recentRun.status === 'running' ? `<button class="danger-button section" data-cancel-run="${recentRun.id}">Stop run</button>` : ''}` : emptyState('No run for this project', 'Describe a goal and review the specialist team before execution.')}<div class="section room-launch"><button class="primary" data-open-context="${project.id}">Open Shared Room</button><p class="help">Codex, Gemini, and Ollama read one transcript and can challenge each other.</p></div><div class="section"><button class="secondary" data-handoff="${project.id}">Create Antigravity handoff</button></div></div></div>
-  </div>`;
-}
-
-function modal(title, subtitle, body, footer = '') {
-  $('#modal-root').innerHTML = `<div class="modal-backdrop"><div class="modal"><div class="modal-header"><div><h2>${esc(title)}</h2><p>${esc(subtitle)}</p></div><button class="close-button" data-action="close-modal">×</button></div><div class="modal-body">${body}</div>${footer ? `<div class="modal-footer">${footer}</div>` : ''}</div></div>`;
-}
-
-function closeModal() { $('#modal-root').innerHTML = ''; }
-
-function newProjectModal() {
-  modal('Create a local project', 'Choose a name and describe the first outcome.', `<div class="field"><label>Project name</label><input class="input" id="new-project-name" placeholder="Auction Website" autofocus /></div><div class="field"><label>Goal</label><textarea class="input" id="new-project-goal" placeholder="Build a responsive auction website with an admin dashboard…"></textarea></div><p class="help">After clicking Create, the app asks you to choose the parent folder. It will not silently hide your project in a mystery directory.</p>`, `<button class="ghost" data-action="close-modal">Cancel</button><button class="primary" data-action="create-project">Create Project</button>`);
-}
-
-function keyModal(provider) {
-  const isGemini = provider === 'gemini';
-  modal(isGemini ? 'Connect Gemini API' : 'Connect OpenAI through Codex', isGemini ? 'The key is validated, then encrypted with your operating system.' : 'Codex receives the key through its official login command. Noor AI Studio does not store it.', `<div class="field"><label>${isGemini ? 'Gemini API key' : 'OpenAI API key'}</label><input class="input" id="provider-key" type="password" autocomplete="off" placeholder="Paste key" /></div><p class="help">The key is never written to the normal state, logs, project files, or diagnostics.</p>`, `<button class="ghost" data-action="close-modal">Cancel</button><button class="primary" data-action="submit-${provider}-key">Connect</button>`);
-}
-
-function progressModal(title, text = 'Starting…') {
-  modal(title, 'Keep this window open while the operation completes.', `<div id="progress-text" class="progress-box">${esc(text)}</div><div class="progress-track"><div id="progress-fill" class="progress-fill"></div></div>`);
-}
-
-function planModal(plan) {
-  const project = currentProject();
-  const options = connectedParticipantOptions();
-  if (!options.length) { toast('Connect at least one provider before starting an agent run.', 'error'); appState.route = 'providers'; render(); return; }
-  const providerSelect = (role, index) => `<select class="input role-provider" data-role-provider="${esc(role)}">${options.map(([id, label], optionIndex) => `<option value="${id}" ${optionIndex === index % options.length ? 'selected' : ''}>${label} • ${esc(appState.data.providers[id].model || 'default model')}</option>`).join('')}</select>`;
-  modal('Review the shared-context plan', project.name, `<div class="shared-plan-banner"><div class="provider-stack">${options.map(([id]) => `<span class="stack-icon ${id}">${providerInitial(id)}</span>`).join('')}</div><div><strong>Cross-provider orchestration is active</strong><p>Every specialist reads the same canonical transcript and current project files. Assign a different backend to each role or reuse one where it is strongest.</p></div></div><div class="field"><label>Goal</label><textarea class="input" id="run-goal">${esc(plan.goal)}</textarea></div><div class="section-heading"><div><h2>Specialists and providers</h2><p>The shared context moves between them automatically.</p></div></div><div class="agent-list role-assignment-list">${plan.roles.map((r, index) => `<div class="agent-card role-assignment"><div class="role-copy"><div class="top"><strong>${esc(r.role)}</strong><span class="badge ${r.writes ? 'warning' : 'info'}">${r.writes ? 'May edit files' : 'Review only'}</span></div><p>${esc(r.purpose)}</p></div>${providerSelect(r.role, index)}</div>`).join('')}</div><div class="section"><h3>Shared-context guarantees</h3><ul class="help">${plan.assumptions.map((a) => `<li>${esc(a)}</li>`).join('')}</ul></div>`, `<button class="ghost" data-action="close-modal">Cancel</button><button class="primary" data-start-run="${plan.id}">Start collaborative build</button>`);
-  $('#modal-root').dataset.plan = JSON.stringify(plan);
-}
-
-async function refreshState() {
-  appState.data = await call(window.noor.app.getState(), { silent: true });
-  render();
-}
-
-async function loadInitial() {
-  try {
-    [appState.data, appState.events, appState.system] = await Promise.all([
-      call(window.noor.app.getState(), { silent: true }),
-      call(window.noor.app.getEvents(300), { silent: true }),
-      call(window.noor.app.systemInfo(), { silent: true })
-    ]);
-    render();
-  } catch (error) {
-    $('#content').innerHTML = emptyState('Failed to load app state', error.message);
-  }
-}
-
-async function handleAction(action, element) {
-  if (action === 'close-modal') return closeModal();
-  if (action === 'complete-onboarding') { appState.data = await call(window.noor.app.completeOnboarding()); return render(); }
-  if (action === 'new-project') return newProjectModal();
-  if (action === 'create-project') {
-    const name = $('#new-project-name').value;
-    const goal = $('#new-project-goal').value;
-    const project = await call(window.noor.projects.create({ name, goal }));
-    closeModal(); await refreshState(); return openWorkspace(project.id);
-  }
-  if (action === 'import-project') { const project = await call(window.noor.projects.import()); await refreshState(); return openWorkspace(project.id); }
-  if (action === 'refresh-all') { progressModal('Checking providers'); await call(window.noor.providers.refreshAll()); closeModal(); await refreshState(); return toast('Provider status refreshed.'); }
-  if (action === 'reload-events') { appState.events = await call(window.noor.app.getEvents(500)); return renderActivity(); }
-  if (action === 'codex-install') { progressModal('Installing OpenAI Codex', 'Downloading the official package with the app-owned runtime…'); try { await call(window.noor.providers.codexInstall()); toast('Codex installed.'); } finally { closeModal(); await refreshState(); } return; }
-  if (action === 'codex-login') { progressModal('OpenAI Codex sign-in', 'The official browser sign-in should open. Complete it there.'); try { await call(window.noor.providers.codexLogin(false)); toast('OpenAI Codex connected.'); } finally { closeModal(); await refreshState(); } return; }
-  if (action === 'codex-api-key') return keyModal('codex');
-  if (action === 'submit-codex-key') { const key = $('#provider-key').value; progressModal('Connecting OpenAI Codex', 'Passing the key to the official Codex login command…'); try { await call(window.noor.providers.codexApiKey(key)); toast('OpenAI Codex connected.'); } finally { closeModal(); await refreshState(); } return; }
-  if (action === 'codex-logout') { await call(window.noor.providers.codexLogout()); await refreshState(); return toast('Codex disconnected.'); }
-  if (action === 'codex-docs') return call(window.noor.providers.openUrl('codex'));
-  if (action === 'gemini-connect') return keyModal('gemini');
-  if (action === 'submit-gemini-key') { const key = $('#provider-key').value; progressModal('Connecting Gemini API', 'Validating the key and discovering models…'); try { await call(window.noor.providers.geminiConnect(key)); toast('Gemini API connected.'); } finally { closeModal(); await refreshState(); } return; }
-  if (action === 'gemini-disconnect') { await call(window.noor.providers.geminiDisconnect()); await refreshState(); return toast('Gemini disconnected.'); }
-  if (action === 'gemini-key-page') return call(window.noor.providers.openUrl('gemini'));
-  if (action === 'ollama-detect') { await call(window.noor.providers.ollamaDetect()); await refreshState(); return toast('Ollama status checked.'); }
-  if (action === 'ollama-install') { progressModal('Install and start Ollama', 'Downloading the official signed Windows installer…'); try { await call(window.noor.providers.ollamaInstall()); toast('Ollama installed and local service started.'); } finally { closeModal(); await refreshState(); } return; }
-  if (action === 'ollama-start') { progressModal('Start Ollama', 'Starting the localhost-only Ollama service…'); try { await call(window.noor.providers.ollamaStart()); toast('Ollama local service is ready.'); } finally { closeModal(); await refreshState(); } return; }
-  if (action === 'ollama-download') return call(window.noor.providers.openUrl('ollama'));
-  if (action === 'ollama-pull') { modal('Download an Ollama model', 'The local Ollama service performs the download.', `<div class="field"><label>Model name</label><input class="input" id="ollama-model" value="gemma3" /></div><p class="help">Confirm the model size on Ollama before downloading. Large models can consume several gigabytes.</p>`, `<button class="ghost" data-action="close-modal">Cancel</button><button class="primary" data-action="submit-ollama-pull">Download</button>`); return; }
-  if (action === 'submit-ollama-pull') { const model = $('#ollama-model').value; progressModal('Downloading Ollama model', 'Waiting for the local Ollama service…'); try { await call(window.noor.providers.ollamaPull(model)); toast('Ollama model downloaded.'); } finally { closeModal(); await refreshState(); } return; }
-  if (action === 'new-context') return openSharedRoom(appState.sharedContextProjectId || appState.currentProjectId || appState.data.projects[0]?.id, true);
-  if (action === 'clear-context') { if (!appState.sharedContext || !confirm('Clear every message in this shared room? Project files are not affected.')) return; appState.sharedContext = await call(window.noor.contexts.clear(appState.sharedContext.id)); return renderCollaboration(); }
-  if (action === 'send-context') {
-    const message = $('#context-message')?.value?.trim();
-    const participants = $$('[data-context-provider]:checked').map((node) => node.dataset.contextProvider);
-    const rounds = Number($('#context-rounds')?.value || 1);
-    if (!message) return toast('Write a message for the team.', 'error');
-    if (!participants.length) return toast('Select at least one connected provider.', 'error');
-    appState.contextParticipants = participants;
-    appState.contextRounds = rounds;
-    appState.contextBusy = true; appState.contextStatus = `Starting ${participants.map(providerName).join(', ')}…`; renderCollaboration();
-    try {
-      appState.sharedContext = await call(window.noor.contexts.send({ projectId: appState.sharedContextProjectId, contextId: appState.sharedContext?.id, message, participants, rounds }));
-      appState.contextStatus = 'All selected providers contributed to the shared room.';
-      toast('Shared conversation completed.');
-    } finally { appState.contextBusy = false; renderCollaboration(); }
-    return;
-  }
-  if (action === 'plan-run') { const project = currentProject(); const goal = project.goal || ''; modal('Describe the outcome', project.name, `<div class="field"><label>What should the agents build or change?</label><textarea class="input" id="plan-goal">${esc(goal)}</textarea></div>`, `<button class="ghost" data-action="close-modal">Cancel</button><button class="primary" data-action="create-plan">Review Plan</button>`); return; }
-  if (action === 'create-plan') { const goal = $('#plan-goal').value; const plan = await call(window.noor.orchestrator.plan(goal)); return planModal(plan); }
-  if (action === 'reload-files') { appState.files = await call(window.noor.projects.listFiles(appState.currentProjectId)); return renderWorkspace(); }
-  if (action === 'save-file') { const content = $('#editor').value; await call(window.noor.projects.saveFile(appState.currentProjectId, appState.currentFile, content)); appState.fileContent = content; return toast('File saved.'); }
-  if (action === 'run-safe-command') { const command = $('#safe-command').value; await call(window.noor.tools.safeCommand(appState.currentProjectId, command)); return; }
-  if (action === 'restore-backup') { const result = await call(window.noor.tools.restore()); return toast(`Restored ${result.restored.length} files.`); }
-  if (action === 'save-settings') { const patch = { ownerLabel: $('#owner-label').value.trim(), defaultProvider: $('#default-provider').value, maxAgents: Number($('#max-agents').value), sharedContextRounds: Number($('#shared-rounds').value) }; appState.data = await call(window.noor.app.updateSettings(patch)); return toast('Settings saved.'); }
-  if (action === 'export-diagnostics') { const file = await call(window.noor.tools.exportDiagnostics()); return toast(`Diagnostics saved to ${file}`); }
-}
-
-document.addEventListener('click', async (event) => {
-  const element = event.target.closest('button, [data-route], [data-open-project], [data-open-folder], [data-open-context], [data-remove-project], [data-backup], [data-preview], [data-validate], [data-cancel-run], [data-handoff], [data-file], [data-start-run]');
-  if (!element) return;
-  try {
-    if (element.dataset.route) {
-      if (!appState.data?.onboardingComplete && element.dataset.route !== 'providers') return;
-      if (element.dataset.route === 'collaboration') return openSharedRoom(appState.sharedContextProjectId || appState.currentProjectId || appState.data.projects[0]?.id);
-      appState.route = element.dataset.route; render(); return;
-    }
-    if (element.dataset.action) return await handleAction(element.dataset.action, element);
-    if (element.dataset.openProject) return openWorkspace(element.dataset.openProject);
-    if (element.dataset.openContext) return openSharedRoom(element.dataset.openContext);
-    if (element.dataset.openFolder) return call(window.noor.projects.openFolder(element.dataset.openFolder));
-    if (element.dataset.removeProject) { if (confirm('Remove this project from Noor AI Studio? The folder and files will remain untouched.')) { await call(window.noor.projects.remove(element.dataset.removeProject)); await refreshState(); } return; }
-    if (element.dataset.backup) { const info = await call(window.noor.tools.backup(element.dataset.backup)); return toast(`Backup created with ${info.files} files.`); }
-    if (element.dataset.preview) { const result = await call(window.noor.tools.previewStart(element.dataset.preview)); return toast(result.message); }
-    if (element.dataset.validate) { await call(window.noor.tools.validate(element.dataset.validate)); return toast('Validation finished. See terminal output.'); }
-    if (element.dataset.cancelRun) { await call(window.noor.orchestrator.cancel(element.dataset.cancelRun)); return toast('Cancellation requested.', 'success'); }
-    if (element.dataset.handoff) { const project = appState.data.projects.find((p) => p.id === element.dataset.handoff); const result = await call(window.noor.tools.handoff({ projectId: project.id, goal: project.goal })); return toast(`Handoff created at ${result.file}`); }
-    if (element.dataset.file) { const data = await call(window.noor.projects.readFile(appState.currentProjectId, element.dataset.file)); appState.currentFile = data.path; appState.fileContent = data.content; return renderWorkspace(); }
-    if (element.dataset.startRun) {
-      const plan = JSON.parse($('#modal-root').dataset.plan || '{}');
-      const goal = $('#run-goal').value;
-      const assignments = {};
-      $$('[data-role-provider]').forEach((select) => { assignments[select.dataset.roleProvider] = { provider: select.value }; });
-      const participants = [...new Set(Object.values(assignments).map((item) => item.provider))];
-      const contextId = appState.sharedContext?.projectId === appState.currentProjectId ? appState.sharedContext.id : null;
-      closeModal(); toast(`Collaborative run started with ${participants.map(providerName).join(', ')}.`);
-      window.noor.orchestrator.run({ projectId: appState.currentProjectId, goal, participants, assignments, contextId, plan }).then(async (result) => {
-        if (!result.ok) toast(result.error, 'error'); else toast('Agent run completed.');
-        await refreshState();
-        if (appState.route === 'workspace') { appState.files = await call(window.noor.projects.listFiles(appState.currentProjectId)); renderWorkspace(); }
-      });
-      return;
-    }
-  } catch (error) { console.error(error); }
-});
-
-document.addEventListener('change', async (event) => {
-  const modelSelect = event.target.closest('[data-provider-model]');
-  if (modelSelect) {
-    try { await call(window.noor.providers.setModel(modelSelect.dataset.providerModel, modelSelect.value)); await refreshState(); toast('Default model updated.'); } catch {}
-    return;
-  }
-  if (event.target.id === 'context-project') {
-    await openSharedRoom(event.target.value);
+  if(event.target.closest('[data-confirm-reset]')){
+    const button=event.target.closest('[data-confirm-reset]');if(button.disabled)return;
+    button.disabled=true;button.textContent='Deleting application data…';
+    const state=await call(window.noor.app.resetData());closeModal();Object.assign(appState,{data:state,route:'home',currentProjectId:null,projectView:'overview',selectedRunId:null,currentFile:null,fileContent:'',files:[],events:[],terminal:{},sharedContext:null,sharedContextProjectId:null,contextBusy:false,contextStatus:'',contextParticipants:null,contextRounds:null});render();return toast('All Noor application data was deleted.');
   }
 });
 
-window.noor.events.onStateChanged((state) => { appState.data = state; render(); });
-window.noor.events.onRunUpdated((run) => {
-  const index = appState.data.runs.findIndex((r) => r.id === run.id);
-  if (index >= 0) appState.data.runs[index] = run;
-  else appState.data.runs.unshift(run);
-  if (['workspace', 'agents', 'home'].includes(appState.route)) render();
-});
-window.noor.events.onActivity((event) => { appState.events.unshift(event); if (appState.route === 'activity') renderActivity(); });
-window.noor.events.onProviderProgress((progress) => {
-  const text = $('#progress-text');
-  if (text) { text.textContent += `\n${progress.status || ''}`; text.scrollTop = text.scrollHeight; }
-  const fill = $('#progress-fill');
-  if (fill && Number.isFinite(progress.percent)) { fill.style.animation = 'none'; fill.style.width = `${Math.max(0, Math.min(100, progress.percent))}%`; }
-});
-window.noor.events.onTerminal(({ projectId, text }) => {
-  appState.terminal[projectId] = (appState.terminal[projectId] || '') + text;
-  if (appState.terminal[projectId].length > 60000) appState.terminal[projectId] = appState.terminal[projectId].slice(-60000);
-  if (appState.route === 'workspace' && appState.currentProjectId === projectId) {
-    const terminal = $('#terminal-output');
-    if (terminal) { terminal.textContent = appState.terminal[projectId]; terminal.scrollTop = terminal.scrollHeight; }
-  }
-});
-window.noor.events.onContextMessage(({ contextId, message }) => {
-  if (!appState.sharedContext || appState.sharedContext.id !== contextId) return;
-  const exists = appState.sharedContext.messages.some((item) => item.id === message.id);
-  if (!exists) appState.sharedContext.messages.push(message);
-  appState.sharedContext.messageCount = appState.sharedContext.messages.length;
-  appState.sharedContext.updatedAt = message.at;
-  if (appState.route === 'collaboration') renderCollaboration();
-});
-window.noor.events.onContextProgress((progress) => {
-  if (!appState.sharedContext || progress.contextId !== appState.sharedContext.id) return;
-  appState.contextStatus = progress.status || `${providerName(progress.provider)} is working…`;
-  if (appState.route === 'collaboration') {
-    const status = $('.context-status');
-    if (status) status.textContent = appState.contextStatus;
-  }
-});
-
-document.addEventListener('keydown', (event) => {
-  if (event.key === 'Enter' && (event.ctrlKey || event.metaKey) && event.target?.id === 'context-message' && !appState.contextBusy) {
-    event.preventDefault();
-    document.querySelector('[data-action="send-context"]')?.click();
-  }
-});
-
+document.addEventListener('input',event=>{if(event.target.id==='reset-confirmation'){const button=$('[data-confirm-reset]');if(button)button.disabled=event.target.value.trim()!=='DELETE'}});
 loadInitial();

@@ -158,6 +158,23 @@ try {
   assert.ok(restored.restored.includes('index.html'));
   assert.equal(fs.readFileSync(path.join(restoreDir, 'index.html'), 'utf8'), '<h1>Hello</h1>');
 
+  const resetDir = path.join(temp, 'reset-state');
+  const resetStore = new LocalStore(resetDir);
+  resetStore.mutate((s) => { s.onboardingComplete = true; s.runs = [{ id: 'old-run', status: 'failed' }]; });
+  resetStore.appendEvent({ level: 'info', message: 'remove me' });
+  resetStore.writeSecretsEnvelope({ schemaVersion: 1, items: { gemini: 'encrypted' } });
+  const resetState = resetStore.reset();
+  assert.equal(resetState.onboardingComplete, false);
+  assert.deepEqual(resetState.runs, []);
+  assert.deepEqual(resetStore.readEvents(10), []);
+  assert.deepEqual(resetStore.readSecretsEnvelope(), { schemaVersion: 1, items: {} });
+
+  const resetContexts = new SharedContextManager(path.join(temp, 'reset-contexts'));
+  const resetRoom = resetContexts.create('reset-project');
+  resetContexts.append(resetRoom.id, { provider: 'user', content: 'remove this transcript' });
+  resetContexts.reset();
+  assert.deepEqual(resetContexts.list(), []);
+
   console.log('All Noor AI Studio tests passed.');
 } finally {
   fs.rmSync(temp, { recursive: true, force: true });

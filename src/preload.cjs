@@ -13,7 +13,8 @@ contextBridge.exposeInMainWorld('noor', {
     getEvents: (limit) => invoke('app:get-events', limit),
     systemInfo: () => invoke('app:system-info'),
     completeOnboarding: () => invoke('app:complete-onboarding'),
-    updateSettings: (patch) => invoke('app:update-settings', patch)
+    updateSettings: (patch) => invoke('app:update-settings', patch),
+    resetData: () => invoke('app:reset-data')
   },
   providers: {
     refreshAll: () => invoke('provider:refresh-all'),
@@ -44,7 +45,8 @@ contextBridge.exposeInMainWorld('noor', {
   orchestrator: {
     plan: (goal) => invoke('orchestrator:plan', goal),
     run: (request) => invoke('orchestrator:run', request),
-    cancel: (runId) => invoke('orchestrator:cancel', runId)
+    cancel: (runId) => invoke('orchestrator:cancel', runId),
+    deleteRun: (runId) => invoke('orchestrator:delete-run', runId)
   },
   contexts: {
     list: (projectId) => invoke('context:list', projectId),
