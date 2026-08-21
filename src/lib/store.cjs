@@ -28,6 +28,7 @@ class LocalStore {
         codex: { installed: false, connected: false, mode: null, path: null, lastCheck: null },
         gemini: { connected: false, model: 'gemini-2.5-flash', models: [], lastCheck: null },
         ollama: { connected: false, model: '', models: [], endpoint: 'http://127.0.0.1:11434', lastCheck: null },
+        agentrouter: { connected: false, model: 'claude-opus-4-8', models: [{ id: 'claude-opus-4-8', name: 'Claude Opus 4.8' }], effort: 'medium', endpoint: 'https://agentrouter.org/v1/messages', lastCheck: null },
         antigravity: { mode: 'manual-handoff', configured: true }
       },
       projects: [],
@@ -39,7 +40,7 @@ class LocalStore {
         approvalMode: 'safe-auto',
         ownerLabel: 'Noor',
         sharedContextRounds: 1,
-        defaultParticipants: ['codex', 'gemini', 'ollama']
+        defaultParticipants: ['codex', 'gemini', 'ollama', 'agentrouter']
       }
     };
   }
@@ -53,6 +54,7 @@ class LocalStore {
         codex: { ...defaults.providers.codex, ...(parsed.providers?.codex || {}) },
         gemini: { ...defaults.providers.gemini, ...(parsed.providers?.gemini || {}) },
         ollama: { ...defaults.providers.ollama, ...(parsed.providers?.ollama || {}) },
+        agentrouter: { ...defaults.providers.agentrouter, ...(parsed.providers?.agentrouter || {}) },
         antigravity: { ...defaults.providers.antigravity, ...(parsed.providers?.antigravity || {}) }
       },
       projects: Array.isArray(parsed.projects) ? parsed.projects : [],

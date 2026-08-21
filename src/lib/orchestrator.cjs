@@ -3,10 +3,11 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { buildContext, safeRelativePath, atomicWrite } = require('./fs-utils.cjs');
 const { providerLabel } = require('./shared-context.cjs');
+const { createBackup, compareBackupToProject, restoreBackupExact } = require('./backup.cjs');
 
 function chooseRoles(goal) {
   const text = goal.toLowerCase();
-  const roles = [{ role: 'Planner', writes: false, purpose: 'Clarify the goal, challenge assumptions, and create an implementation plan.' }];
+  const roles = [{ role: 'Planner', writes: true, purpose: 'Clarify the goal, challenge assumptions, and create an implementation plan. Create or update planning files when useful.' }];
   if (/website|web app|frontend|ui|dashboard|landing|react|html|css/.test(text)) {
     roles.push({ role: 'Frontend', writes: true, purpose: 'Implement the interface and client-side behavior.' });
   }
@@ -21,7 +22,7 @@ function chooseRoles(goal) {
   }
   if (roles.length === 1) roles.push({ role: 'Builder', writes: true, purpose: 'Implement the requested result end to end.' });
   roles.push({ role: 'QA', writes: true, purpose: 'Add or improve tests and validate the implementation.' });
-  roles.push({ role: 'Reviewer', writes: false, purpose: 'Review the final project, reconcile model disagreements, and report remaining risks.' });
+  roles.push({ role: 'Reviewer', writes: true, purpose: 'Review the final project, reconcile model disagreements, and fix issues found during review.' });
   return roles.slice(0, 6);
 }
 
@@ -64,23 +65,194 @@ function summarizeProviderEvent(event) {
 }
 
 function assignProviders(roles, participants, explicitAssignments = {}, providerState = {}) {
-  const available = [...new Set((participants || []).filter((id) => ['codex', 'gemini', 'ollama'].includes(id) && providerState[id]?.connected))];
+  const available = [...new Set((participants || []).filter((id) => ['codex', 'gemini', 'ollama', 'agentrouter'].includes(id) && providerState[id]?.connected))];
   if (!available.length) throw new Error('Select at least one connected provider.');
   return roles.map((role, index) => {
     const requested = explicitAssignments?.[role.role]?.provider || explicitAssignments?.[role.role] || null;
     const provider = requested && available.includes(requested) ? requested : available[index % available.length];
     const model = explicitAssignments?.[role.role]?.model || providerState[provider]?.model || null;
-    return { ...role, provider, model };
+    return { ...role, writes: true, provider, model };
   });
 }
 
+function providerEventFiles(event) {
+  const item = event?.item;
+  if (item?.type !== 'file_change') return [];
+  const changes = Array.isArray(item.changes) ? item.changes : [item];
+  return changes
+    .map((change) => change?.path || change?.file_path || change?.file?.path)
+    .filter((value) => typeof value === 'string' && value.trim())
+    .map((value) => value.replaceAll('\\', '/'));
+}
+
+const STRUCTURED_AGENT_SYSTEM_PROMPT = [
+  'You are a file-editing software agent running inside Noor AI Studio.',
+  'Your response is consumed by code, not displayed as ordinary chat. Return exactly one valid JSON object and no text before or after it.',
+  'The required object has exactly these top-level fields: summary, files, and notes.',
+  'summary must be a non-empty string describing completed work.',
+  'files must be a JSON array. Every item must be an object with path and content string fields. path is a project-relative path using forward slashes. content is the complete final contents of that file, not a patch, diff, excerpt, placeholder, or markdown code block.',
+  'notes must be an array of strings. Use an empty array when there are no notes. Use an empty files array only when the task genuinely requires no file changes.',
+  'Never return files as an object map. Never use filename, filePath, code, patch, diff, artifact, or nested project fields instead of path and content.',
+  'Never use absolute paths, file URLs, drive letters, parent traversal, .git, or .noor-ai paths.',
+  'Escape quotes, backslashes, tabs, and newlines so the response remains valid JSON. Do not wrap the JSON in markdown fences.',
+  'Before responding, verify that JSON.parse would succeed and every requested file contains its complete implementation.'
+].join('\n');
+
+const STRUCTURED_FILE_RESPONSE_SCHEMA = {
+  type: 'object',
+  propertyOrdering: ['summary', 'files', 'notes'],
+  properties: {
+    summary: { type: 'string', description: 'A concise summary of completed work.' },
+    files: {
+      type: 'array',
+      description: 'Files to create or fully replace, using project-relative paths and complete contents.',
+      items: {
+        type: 'object',
+        propertyOrdering: ['path', 'content'],
+        properties: {
+          path: { type: 'string', description: 'Project-relative path using forward slashes.' },
+          content: { type: 'string', description: 'Complete final file contents.' }
+        },
+        required: ['path', 'content']
+      }
+    },
+    notes: { type: 'array', items: { type: 'string' }, description: 'Important notes, or an empty array.' }
+  },
+  required: ['summary', 'files', 'notes']
+};
+
+function validateStructuredPayload(payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('response is not a JSON object');
+  if (typeof payload.summary !== 'string' || !payload.summary.trim()) throw new Error('summary must be a non-empty string');
+  if (!Array.isArray(payload.files)) throw new Error('files must be an array');
+  if (!Array.isArray(payload.notes) || payload.notes.some((note) => typeof note !== 'string')) throw new Error('notes must be an array of strings');
+  if (payload.files.length > 60) throw new Error('files contains more than 60 entries');
+  const paths = new Set();
+  for (const [index, file] of payload.files.entries()) {
+    if (!file || typeof file !== 'object' || Array.isArray(file)) throw new Error(`files[${index}] must be an object`);
+    if (typeof file.path !== 'string' || !file.path.trim()) throw new Error(`files[${index}].path must be a non-empty string`);
+    if (typeof file.content !== 'string') throw new Error(`files[${index}].content must be a string`);
+    const relative = safeRelativePath(file.path);
+    if (paths.has(relative)) throw new Error(`files contains duplicate path: ${relative}`);
+    paths.add(relative);
+  }
+  return { summary: payload.summary.trim(), files: payload.files, notes: payload.notes };
+}
+
 class Orchestrator {
-  constructor({ store, providers, contexts, emit }) {
+  constructor({ store, providers, contexts, emit, userData }) {
     this.store = store;
     this.providers = providers;
     this.contexts = contexts;
     this.emit = emit;
     this.controllers = new Map();
+    this.reviewDir = path.join(userData || store.baseDir, 'run-reviews');
+    fs.mkdirSync(this.reviewDir, { recursive: true });
+    this.recoverInterruptedRuns();
+  }
+
+  reviewSnapshotPath(runId) {
+    return path.join(this.reviewDir, `${runId}.noorbackup`);
+  }
+
+  attributeChanges(run, changes) {
+    return changes.map((change) => {
+      let agents = (run?.agents || []).filter((agent) => (agent.files || []).includes(change.path));
+      if (!agents.length) {
+        const completedCodexAgents = (run?.agents || []).filter((agent) => agent.provider === 'codex' && agent.status === 'completed');
+        if (completedCodexAgents.length === 1) agents = completedCodexAgents;
+      }
+      return { ...change, agents: agents.map((agent) => ({ id: agent.id, role: agent.role, provider: agent.provider })) };
+    });
+  }
+
+  recoverInterruptedRuns() {
+    const state = this.store.getState();
+    const interrupted = state.runs.filter((run) => run.status === 'running' || run.review?.status === 'capturing');
+    if (!interrupted.length) return;
+    const recovery = new Map();
+    for (const run of interrupted) {
+      const project = state.projects.find((item) => item.id === run.projectId);
+      const snapshotPath = this.reviewSnapshotPath(run.id);
+      if (project && fs.existsSync(snapshotPath)) {
+        try { recovery.set(run.id, this.attributeChanges(run, compareBackupToProject(snapshotPath, project.path))); } catch {}
+      }
+    }
+    this.store.mutate((next) => {
+      for (const run of next.runs.filter((item) => interrupted.some((candidate) => candidate.id === item.id))) {
+        const changes = recovery.get(run.id);
+        run.status = 'cancelled';
+        run.executionStatus = 'cancelled';
+        run.completedAt = new Date().toISOString();
+        run.currentAgent = null;
+        run.activeAgents = [];
+        run.error = 'The application closed before this run finished.';
+        for (const agent of run.agents || []) {
+          if (['running', 'queued'].includes(agent.status)) {
+            agent.status = 'cancelled';
+            agent.error = run.error;
+            agent.completedAt = run.completedAt;
+          }
+        }
+        run.review = changes
+          ? { status: 'pending', createdAt: run.completedAt, decidedAt: null, changes }
+          : { status: 'unavailable', createdAt: null, decidedAt: null, changes: [] };
+      }
+    });
+  }
+
+  buildReview(runId, projectPath) {
+    const snapshotPath = this.reviewSnapshotPath(runId);
+    const run = this.store.getState().runs.find((item) => item.id === runId);
+    const changes = this.attributeChanges(run, compareBackupToProject(snapshotPath, projectPath));
+    return { status: 'pending', createdAt: new Date().toISOString(), decidedAt: null, changes };
+  }
+
+  reviewRun(runId, decision) {
+    if (!['accept', 'reject'].includes(decision)) throw new Error('Choose whether to accept or reject the edits.');
+    const state = this.store.getState();
+    const run = state.runs.find((item) => item.id === runId);
+    if (!run) throw new Error('Agent run not found.');
+    if (run.review?.status !== 'pending') throw new Error('This run no longer has edits waiting for review.');
+    if (this.controllers.has(runId)) throw new Error('Wait for the agents to finish before reviewing their edits.');
+    const project = state.projects.find((item) => item.id === run.projectId);
+    if (!project) throw new Error('Project not found.');
+    const snapshotPath = this.reviewSnapshotPath(runId);
+    if (!fs.existsSync(snapshotPath)) throw new Error('The recovery snapshot for this run is missing.');
+
+    let restored = null;
+    if (decision === 'reject') restored = restoreBackupExact(snapshotPath, project.path);
+    fs.rmSync(snapshotPath, { force: true });
+    const nextStatus = decision === 'accept'
+      ? (run.executionStatus === 'completed' ? 'completed' : run.executionStatus)
+      : 'rejected';
+    const updated = this.updateRun(runId, (target) => {
+      target.status = nextStatus;
+      target.review.status = decision === 'accept' ? 'accepted' : 'rejected';
+      target.review.decidedAt = new Date().toISOString();
+    });
+    const action = decision === 'accept' ? 'accepted' : 'rejected and restored';
+    this.appendContext(run.contextId, {
+      kind: 'user', provider: 'user', role: 'Edit review',
+      content: `Agent edits were ${action} by the user.`, metadata: { runId, decision }
+    });
+    this.log(runId, decision === 'accept' ? 'success' : 'warning', `Agent edits ${action}`, {
+      projectId: run.projectId, changedFiles: run.review.changes?.length || 0,
+      restoredFiles: restored?.restored?.length || 0, removedFiles: restored?.removed?.length || 0
+    });
+    return updated;
+  }
+
+  discardReviewSnapshot(runId) {
+    fs.rmSync(this.reviewSnapshotPath(runId), { force: true });
+  }
+
+  resetReviewSnapshots() {
+    const resolved = path.resolve(this.reviewDir);
+    const base = path.resolve(this.store.baseDir);
+    if (resolved === base || !resolved.startsWith(`${base}${path.sep}`)) throw new Error('Refusing to clear an unsafe review snapshot path.');
+    fs.rmSync(resolved, { recursive: true, force: true });
+    fs.mkdirSync(resolved, { recursive: true });
   }
 
   plan(goal) {
@@ -162,6 +334,38 @@ class Orchestrator {
     return written;
   }
 
+  async requestStructuredAgentOutput({ runId, agent, prompt, signal }) {
+    const request = (requestPrompt) => this.providers.run(agent.provider, {
+      prompt: requestPrompt,
+      model: agent.model,
+      signal,
+      responseMode: 'json',
+      systemPrompt: STRUCTURED_AGENT_SYSTEM_PROMPT,
+      responseSchema: STRUCTURED_FILE_RESPONSE_SCHEMA
+    });
+    const first = await request(prompt);
+    try {
+      return validateStructuredPayload(first.json);
+    } catch (firstError) {
+      const finish = first.finishReason ? ` Gemini finish reason: ${first.finishReason}.` : '';
+      this.log(runId, 'warning', `${agent.role} returned malformed file output; asking ${providerLabel(agent.provider)} to correct it once.`, {
+        agentId: agent.id, role: agent.role, provider: agent.provider, validationError: firstError.message
+      });
+      const correction = [
+        prompt,
+        'CORRECTION REQUIRED: Your previous response could not be applied by Noor AI Studio.',
+        `Validation error: ${firstError.message}.${finish}`,
+        'Redo the requested task and return the complete result using the system JSON contract. Return one JSON object only. Do not explain the correction and do not use markdown.'
+      ].join('\n\n');
+      const second = await request(correction);
+      try {
+        return validateStructuredPayload(second.json);
+      } catch (secondError) {
+        throw new Error(`${agent.role} returned invalid file output twice (${secondError.message}). No output from this agent was applied.`);
+      }
+    }
+  }
+
   async converse({ projectId, contextId, message, participants, rounds = 1 }) {
     const state = this.store.getState();
     const project = state.projects.find((item) => item.id === projectId);
@@ -237,11 +441,21 @@ class Orchestrator {
     const project = state.projects.find((p) => p.id === projectId);
     if (!project) throw new Error('Project not found.');
     if (!fs.existsSync(project.path)) throw new Error('The project folder no longer exists.');
-    const selectedPlan = plan || publicPlan(goal);
+    const pendingReview = state.runs.find((item) => item.projectId === projectId && item.review?.status === 'pending');
+    if (pendingReview) throw new Error('Review the previous agent edits before starting another run in this project.');
+    const selectedPlan = JSON.parse(JSON.stringify(plan || publicPlan(goal)));
+    selectedPlan.parallel = Boolean(selectedPlan.parallel);
+    selectedPlan.roles = (selectedPlan.roles || []).map((role) => ({ ...role, writes: true }));
     const selectedParticipants = participants?.length ? participants : provider ? [provider] : this.providers.connectedProviderIds();
     const assignedRoles = assignProviders(selectedPlan.roles, selectedParticipants, assignments, state.providers);
     const room = contextId ? this.contexts.get(contextId) : this.contexts.getOrCreate(projectId, `${project.name} Engineering Context`);
     const runId = crypto.randomUUID();
+    const snapshotPath = this.reviewSnapshotPath(runId);
+    const snapshot = createBackup(project, snapshotPath, { maxTotal: 1024 * 1024 * 1024, maxFile: 128 * 1024 * 1024 });
+    if (snapshot.excludedFiles.length) {
+      fs.rmSync(snapshotPath, { force: true });
+      throw new Error(`A complete edit-review snapshot could not be created because ${snapshot.excludedFiles.length} project file${snapshot.excludedFiles.length === 1 ? ' is' : 's are'} too large. Move large generated files into an ignored build or dependency folder before starting agents.`);
+    }
     const controller = new AbortController();
     this.controllers.set(runId, controller);
     this.appendContext(room.id, { kind: 'user', provider: 'user', role: 'Project goal', content: goal, metadata: { runId, type: 'agent-run' } });
@@ -254,50 +468,68 @@ class Orchestrator {
       providers: [...new Set(assignedRoles.map((item) => item.provider))],
       model: model || null,
       status: 'running',
+      executionStatus: 'running',
+      executionMode: selectedPlan.parallel ? 'parallel' : 'sequential',
       startedAt: new Date().toISOString(),
       completedAt: null,
       currentAgent: null,
+      activeAgents: [],
       plan: selectedPlan,
       agents: assignedRoles.map((r) => ({
-        id: crypto.randomUUID(), role: r.role, purpose: r.purpose, writes: r.writes,
+        id: crypto.randomUUID(), role: r.role, purpose: r.purpose, writes: r.writes, custom: Boolean(r.custom),
         provider: r.provider, model: r.model || model || null, status: 'queued', summary: '', files: [], error: null,
         startedAt: null, completedAt: null
       })),
       finalSummary: '',
-      error: null
+      error: null,
+      review: { status: 'capturing', createdAt: null, decidedAt: null, changes: [] }
     };
-    this.store.mutate((s) => { s.runs.unshift(run); s.runs = s.runs.slice(0, 100); });
-    this.log(runId, 'info', `Shared-context run started with ${run.agents.length} agents across ${run.providers.map(providerLabel).join(', ')}`, { projectId, providers: run.providers, contextId: room.id });
+    this.store.mutate((s) => {
+      s.runs.unshift(run);
+      s.runs = s.runs.filter((item, index) => index < 100 || item.review?.status === 'pending');
+    });
+    this.log(runId, 'info', `${selectedPlan.parallel ? 'Parallel' : 'Sequential'} run started with ${run.agents.length} agents across ${run.providers.map(providerLabel).join(', ')}`, { projectId, providers: run.providers, contextId: room.id, executionMode: run.executionMode });
     this.emit('state-changed', this.store.getState());
 
-    const summaries = [];
-    try {
-      for (const agent of run.agents) {
-        if (controller.signal.aborted) throw new Error('Run cancelled by user.');
-        this.updateRun(runId, (r) => {
-          r.currentAgent = agent.id;
-          const target = r.agents.find((a) => a.id === agent.id);
-          target.status = 'running';
-          target.startedAt = new Date().toISOString();
-        });
-        this.log(runId, 'info', `${agent.role} started with ${providerLabel(agent.provider)}`, { agentId: agent.id, role: agent.role, provider: agent.provider });
+    const summaries = new Map();
+    const executeAgent = async (agent) => {
+      if (controller.signal.aborted) throw new Error('Run cancelled by user.');
+      this.updateRun(runId, (r) => {
+        r.currentAgent = r.executionMode === 'sequential' ? agent.id : null;
+        if (!r.activeAgents.includes(agent.id)) r.activeAgents.push(agent.id);
+        const target = r.agents.find((a) => a.id === agent.id);
+        target.status = 'running';
+        target.startedAt = new Date().toISOString();
+      });
+      this.log(runId, 'info', `${agent.role} started with ${providerLabel(agent.provider)}`, { agentId: agent.id, role: agent.role, provider: agent.provider });
 
-        const projectContext = buildContext(project.path, agent.provider === 'codex' ? 16000 : 52000);
-        const transcript = this.contexts.buildTranscript(room.id, { maxChars: agent.provider === 'codex' ? 36000 : 65000 });
+      try {
+        const projectContextLimit = agent.provider === 'codex' ? 16000 : agent.provider === 'ollama' ? 18000 : 52000;
+        const transcriptLimit = agent.provider === 'codex' ? 36000 : agent.provider === 'ollama' ? 24000 : 65000;
+        const projectContext = buildContext(project.path, projectContextLimit);
+        const transcript = this.contexts.buildTranscript(room.id, { maxChars: transcriptLimit });
         let summary = '';
         let files = [];
         if (agent.provider === 'codex') {
+          const reportedFiles = new Set();
           const result = await this.providers.run('codex', {
             cwd: project.path,
             prompt: this.createCodexPrompt({ agent, goal, sharedTranscript: transcript }),
             model: agent.model,
             signal: controller.signal,
-            sandbox: agent.writes ? 'workspace-write' : 'read-only',
+            sandbox: 'workspace-write',
             onEvent: (event) => {
+              for (const rawPath of providerEventFiles(event)) {
+                try {
+                  const relative = path.isAbsolute(rawPath) ? path.relative(project.path, rawPath) : rawPath;
+                  reportedFiles.add(safeRelativePath(relative));
+                } catch {}
+              }
               const message = summarizeProviderEvent(event);
               if (message) this.log(runId, 'progress', message, { agentId: agent.id, role: agent.role, provider: agent.provider });
             }
           });
+          files = [...reportedFiles];
           summary = result.text || `${agent.role} completed.`;
         } else {
           const prompt = this.createAgentPrompt({
@@ -305,19 +537,15 @@ class Orchestrator {
             purpose: agent.purpose,
             goal,
             context: projectContext,
-            writes: agent.writes,
+            writes: true,
             sharedTranscript: transcript
           });
-          const result = await this.providers.run(agent.provider, { prompt, model: agent.model, signal: controller.signal, responseMode: 'json' });
-          const payload = result.json;
-          if (!payload || typeof payload.summary !== 'string') {
-            throw new Error(`${agent.role} returned invalid structured output. No files were changed.`);
-          }
-          files = agent.writes ? this.applyStructuredFiles(project.path, payload) : [];
+          const payload = await this.requestStructuredAgentOutput({ runId, agent, prompt, signal: controller.signal });
+          files = this.applyStructuredFiles(project.path, payload);
           summary = payload.summary;
           if (Array.isArray(payload.notes) && payload.notes.length) summary += `\n${payload.notes.join('\n')}`;
         }
-        summaries.push(`${agent.role} (${providerLabel(agent.provider)}): ${summary.slice(0, 1800)}`);
+        summaries.set(agent.id, `${agent.role} (${providerLabel(agent.provider)}): ${summary.slice(0, 1800)}`);
         this.appendContext(room.id, {
           kind: 'assistant', provider: agent.provider, model: agent.model, role: agent.role,
           content: `${summary}${files.length ? `\n\nFiles written: ${files.join(', ')}` : ''}`,
@@ -329,31 +557,84 @@ class Orchestrator {
           target.summary = summary;
           target.files = files;
           target.completedAt = new Date().toISOString();
+          r.activeAgents = r.activeAgents.filter((id) => id !== agent.id);
         });
         this.log(runId, 'success', `${agent.role} completed with ${providerLabel(agent.provider)}`, { agentId: agent.id, role: agent.role, provider: agent.provider, files });
+      } catch (error) {
+        const cancelled = controller.signal.aborted || /cancelled/i.test(error.message);
+        this.updateRun(runId, (r) => {
+          const target = r.agents.find((a) => a.id === agent.id);
+          target.status = cancelled ? 'cancelled' : 'failed';
+          target.error = error.message;
+          target.completedAt = new Date().toISOString();
+          r.activeAgents = r.activeAgents.filter((id) => id !== agent.id);
+        });
+        this.appendContext(room.id, {
+          kind: 'error', provider: agent.provider, model: agent.model, role: agent.role,
+          content: error.message, metadata: { runId, agentId: agent.id }
+        });
+        this.log(runId, cancelled ? 'warning' : 'error', `${agent.role}: ${error.message}`, { agentId: agent.id, role: agent.role, provider: agent.provider });
+        throw error;
+      }
+    };
+
+    try {
+      const executionFailures = [];
+      if (selectedPlan.parallel) {
+        const results = await Promise.allSettled(run.agents.map((agent) => executeAgent(agent)));
+        results.forEach((result, index) => {
+          if (result.status === 'rejected') executionFailures.push({ agent: run.agents[index], error: result.reason });
+        });
+        if (controller.signal.aborted) throw new Error('Run cancelled by user.');
+      } else {
+        for (const agent of run.agents) {
+          try { await executeAgent(agent); }
+          catch (error) {
+            if (controller.signal.aborted || /cancelled/i.test(error.message)) throw error;
+            executionFailures.push({ agent, error });
+          }
+        }
       }
 
-      const finalSummary = summaries.join('\n\n');
+      const failureSummary = executionFailures.map(({ agent, error }) => `${agent.role} (${providerLabel(agent.provider)}) failed: ${error.message}`);
+      const finalSummary = [...run.agents.map((agent) => summaries.get(agent.id)).filter(Boolean), ...failureSummary].join('\n\n');
+      const executionStatus = executionFailures.length ? 'completed-with-errors' : 'completed';
       this.updateRun(runId, (r) => {
-        r.status = 'completed';
+        r.status = 'awaiting-review';
+        r.executionStatus = executionStatus;
         r.completedAt = new Date().toISOString();
         r.currentAgent = null;
+        r.activeAgents = [];
         r.finalSummary = finalSummary;
+        r.error = executionFailures.length ? `${executionFailures.length} agent${executionFailures.length === 1 ? '' : 's'} could not complete. Later agents were allowed to continue.` : null;
+        r.review = this.buildReview(runId, project.path);
       });
-      this.log(runId, 'success', 'Shared-context run completed', { projectId, contextId: room.id });
+      const reviewed = this.store.getState().runs.find((r) => r.id === runId);
+      this.appendContext(room.id, {
+        kind: 'system', provider: 'system', role: 'Edit review',
+        content: `${reviewed.review.changes.length} project file change${reviewed.review.changes.length === 1 ? '' : 's'} waiting for user approval.`,
+        metadata: { runId, changes: reviewed.review.changes }
+      });
+      this.log(runId, executionFailures.length ? 'warning' : 'success', executionFailures.length ? `Agent execution finished with ${executionFailures.length} issue${executionFailures.length === 1 ? '' : 's'}; edits are waiting for review` : 'Agent execution completed; edits are waiting for review', { projectId, contextId: room.id, changedFiles: reviewed.review.changes.length, failedAgents: executionFailures.length });
       return this.store.getState().runs.find((r) => r.id === runId);
     } catch (error) {
       const cancelled = controller.signal.aborted || /cancelled/i.test(error.message);
       this.updateRun(runId, (r) => {
         r.status = cancelled ? 'cancelled' : 'failed';
+        r.executionStatus = r.status;
         r.completedAt = new Date().toISOString();
         r.error = error.message;
         r.currentAgent = null;
-        const active = r.agents.find((a) => a.status === 'running');
-        if (active) { active.status = cancelled ? 'cancelled' : 'failed'; active.error = error.message; active.completedAt = new Date().toISOString(); }
+        r.activeAgents = [];
+        for (const agent of r.agents.filter((item) => item.status === 'running' || (cancelled && item.status === 'queued'))) {
+          agent.status = cancelled ? 'cancelled' : 'failed';
+          agent.error = error.message;
+          agent.completedAt = new Date().toISOString();
+        }
+        r.review = this.buildReview(runId, project.path);
       });
       this.appendContext(room.id, { kind: 'error', provider: 'system', role: 'Run status', content: error.message, metadata: { runId } });
-      this.log(runId, cancelled ? 'warning' : 'error', error.message, { projectId, contextId: room.id });
+      this.log(runId, cancelled ? 'warning' : 'error', `${error.message} Review or reject any partial file edits.`, { projectId, contextId: room.id });
       throw error;
     } finally {
       this.controllers.delete(runId);
@@ -367,9 +648,63 @@ class Orchestrator {
     return true;
   }
 
+  async retryAgent(runId, agentId) {
+    const state = this.store.getState();
+    const previousRun = state.runs.find((item) => item.id === runId);
+    if (!previousRun) throw new Error('Agent run not found.');
+    if (previousRun.status === 'running') throw new Error('Wait for the current run to finish before retrying an agent.');
+    if (state.runs.some((item) => item.projectId === previousRun.projectId && item.status === 'running')) {
+      throw new Error('Another agent run is already working in this project. Wait for it to finish before retrying.');
+    }
+    if (previousRun.review?.status === 'pending') throw new Error('Accept or reject the current edits before retrying this agent.');
+    const previousAgent = previousRun.agents?.find((item) => item.id === agentId);
+    if (!previousAgent) throw new Error('Agent not found in this run.');
+    if (previousAgent.status !== 'failed') throw new Error('Only a failed agent can be run again.');
+    const providerState = state.providers?.[previousAgent.provider];
+    if (!providerState?.connected) throw new Error(`${providerLabel(previousAgent.provider)} is not connected. Reconnect it before running this agent again.`);
+
+    const retryPlan = {
+      id: crypto.randomUUID(),
+      goal: previousRun.goal,
+      assumptions: previousRun.plan?.assumptions || [],
+      validation: previousRun.plan?.validation || [],
+      parallel: false,
+      retryOf: { runId, agentId },
+      roles: [{
+        role: previousAgent.role,
+        purpose: previousAgent.purpose,
+        writes: true,
+        custom: Boolean(previousAgent.custom)
+      }]
+    };
+    this.log(runId, 'info', `Retry requested for ${previousAgent.role} with ${providerLabel(previousAgent.provider)}`, {
+      projectId: previousRun.projectId,
+      agentId,
+      provider: previousAgent.provider
+    });
+    return this.run({
+      projectId: previousRun.projectId,
+      goal: previousRun.goal,
+      participants: [previousAgent.provider],
+      assignments: {
+        [previousAgent.role]: { provider: previousAgent.provider, model: previousAgent.model || providerState.model || null }
+      },
+      plan: retryPlan,
+      contextId: previousRun.contextId
+    });
+  }
+
   hasActiveOperations() {
     return this.controllers.size > 0;
   }
 }
 
-module.exports = { Orchestrator, publicPlan, chooseRoles, assignProviders };
+module.exports = {
+  Orchestrator,
+  publicPlan,
+  chooseRoles,
+  assignProviders,
+  validateStructuredPayload,
+  STRUCTURED_AGENT_SYSTEM_PROMPT,
+  STRUCTURED_FILE_RESPONSE_SCHEMA
+};

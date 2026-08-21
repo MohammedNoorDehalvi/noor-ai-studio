@@ -7,6 +7,30 @@ const { replaceFileSync } = require('./atomic-file.cjs');
 
 const OLLAMA_ENDPOINT = 'http://127.0.0.1:11434';
 const OLLAMA_WINDOWS_INSTALLER = 'https://ollama.com/download/OllamaSetup.exe';
+const AGENTROUTER_ENDPOINT = 'https://agentrouter.org/v1/messages';
+const AGENTROUTER_MODEL = 'claude-opus-4-8';
+const AGENTROUTER_EFFORT = 'medium';
+const AGENTROUTER_USER_AGENT = 'claude-cli/2.1.0 (external, cli)';
+
+function buildAgentRouterRequest(prompt, { maxTokens = 16000, systemPrompt = '' } = {}) {
+  const request = {
+    model: AGENTROUTER_MODEL,
+    max_tokens: maxTokens,
+    thinking: { type: 'adaptive' },
+    output_config: { effort: AGENTROUTER_EFFORT },
+    messages: [{ role: 'user', content: String(prompt || '') }]
+  };
+  if (systemPrompt) request.system = String(systemPrompt);
+  return request;
+}
+
+function extractAnthropicText(data) {
+  return (data?.content || [])
+    .filter((block) => block?.type === 'text')
+    .map((block) => block.text || '')
+    .join('')
+    .trim();
+}
 
 function parseLooseJson(text) {
   const trimmed = String(text || '').trim();
@@ -103,7 +127,7 @@ class ProviderManager {
 
   connectedProviderIds() {
     const providers = this.store.getState().providers;
-    return ['codex', 'gemini', 'ollama'].filter((id) => Boolean(providers[id]?.connected));
+    return ['codex', 'gemini', 'ollama', 'agentrouter'].filter((id) => Boolean(providers[id]?.connected));
   }
 
   managedCodexPath() {
@@ -254,7 +278,12 @@ class ProviderManager {
     const data = await response.json();
     const models = (data.models || [])
       .filter((m) => (m.supportedGenerationMethods || []).includes('generateContent'))
-      .map((m) => ({ id: String(m.name || '').replace(/^models\//, ''), name: m.displayName || m.name }))
+      .map((m) => ({
+        id: String(m.name || '').replace(/^models\//, ''),
+        name: m.displayName || m.name,
+        inputTokenLimit: Number(m.inputTokenLimit) || null,
+        outputTokenLimit: Number(m.outputTokenLimit) || null
+      }))
       .filter((m) => m.id)
       .sort((a, b) => a.id.localeCompare(b.id));
     return models;
@@ -302,26 +331,120 @@ class ProviderManager {
     return this.store.getState().providers.gemini;
   }
 
-  async runGemini({ prompt, model, signal, responseMode = 'json' }) {
+  async runGemini({ prompt, model, signal, responseMode = 'json', systemPrompt = '', responseSchema = null }) {
     const key = this.getSecret('gemini-api-key');
     if (!key) throw new Error('Gemini API is not connected.');
     const selected = model || this.store.getState().providers.gemini.model || 'gemini-2.5-flash';
-    const generationConfig = { temperature: responseMode === 'json' ? 0.2 : 0.45 };
-    if (responseMode === 'json') generationConfig.responseMimeType = 'application/json';
+    const modelInfo = this.store.getState().providers.gemini.models?.find((item) => item.id === selected);
+    const generationConfig = {
+      temperature: responseMode === 'json' ? 0.1 : 0.45,
+      maxOutputTokens: Math.max(2048, Math.min(Number(modelInfo?.outputTokenLimit) || 16384, 32768))
+    };
+    if (responseMode === 'json') {
+      generationConfig.responseMimeType = 'application/json';
+      if (responseSchema) generationConfig.responseSchema = responseSchema;
+    }
+    const requestBody = {
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      generationConfig
+    };
+    if (systemPrompt) requestBody.systemInstruction = { parts: [{ text: String(systemPrompt) }] };
     const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(selected)}:generateContent`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-goog-api-key': key },
       signal,
-      body: JSON.stringify({
-        contents: [{ role: 'user', parts: [{ text: prompt }] }],
-        generationConfig
-      })
+      body: JSON.stringify(requestBody)
     });
     const raw = await response.text();
     if (!response.ok) throw new Error(`Gemini request failed (${response.status}): ${raw.slice(0, 800)}`);
     const data = JSON.parse(raw);
     const text = (data.candidates || []).flatMap((c) => c.content?.parts || []).map((p) => p.text || '').join('').trim();
+    return { text, json: responseMode === 'json' ? parseLooseJson(text) : null, finishReason: data.candidates?.[0]?.finishReason || null, raw: data };
+  }
+
+  async requestAgentRouter({ apiKey, prompt, signal, responseMode = 'json', maxTokens = 16000, systemPrompt = '' }) {
+    const response = await fetch(AGENTROUTER_ENDPOINT, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${apiKey}`,
+        'anthropic-version': '2023-06-01',
+        'user-agent': AGENTROUTER_USER_AGENT
+      },
+      signal: signal || AbortSignal.timeout(60000),
+      body: JSON.stringify(buildAgentRouterRequest(prompt, { maxTokens, systemPrompt }))
+    });
+    const raw = await response.text();
+    if (!response.ok) throw new Error(`AgentRouter request failed (${response.status}): ${raw.slice(0, 800)}`);
+    let data;
+    try { data = JSON.parse(raw); } catch { throw new Error('AgentRouter returned an invalid response.'); }
+    const text = extractAnthropicText(data);
+    if (!text) throw new Error('Claude Opus 4.8 returned an empty response.');
     return { text, json: responseMode === 'json' ? parseLooseJson(text) : null, raw: data };
+  }
+
+  async connectAgentRouter(apiKey) {
+    const key = String(apiKey || '').trim();
+    if (!key) throw new Error('AgentRouter API key is required.');
+    if (!this.safeStorage.isEncryptionAvailable()) throw new Error('Operating-system encryption is required before an AgentRouter key can be saved.');
+    await this.requestAgentRouter({
+      apiKey: key,
+      prompt: 'Reply with only OK to confirm this API key can invoke Claude Opus 4.8.',
+      responseMode: 'text',
+      maxTokens: 1024
+    });
+    this.setSecret('agentrouter-api-key', key);
+    this.store.mutate((s) => {
+      s.providers.agentrouter = {
+        ...s.providers.agentrouter,
+        connected: true,
+        model: AGENTROUTER_MODEL,
+        models: [{ id: AGENTROUTER_MODEL, name: 'Claude Opus 4.8' }],
+        effort: AGENTROUTER_EFFORT,
+        endpoint: AGENTROUTER_ENDPOINT,
+        lastCheck: new Date().toISOString(),
+        detail: 'Claude Opus 4.8 ready · medium effort'
+      };
+    });
+    return this.store.getState().providers.agentrouter;
+  }
+
+  async disconnectAgentRouter() {
+    this.deleteSecret('agentrouter-api-key');
+    this.store.mutate((s) => {
+      s.providers.agentrouter = {
+        ...s.providers.agentrouter,
+        connected: false,
+        lastCheck: new Date().toISOString(),
+        detail: 'Not connected'
+      };
+    });
+    return this.store.getState().providers.agentrouter;
+  }
+
+  async refreshAgentRouter() {
+    let key = null;
+    let keyError = null;
+    try { key = this.getSecret('agentrouter-api-key'); } catch (error) { keyError = error; }
+    this.store.mutate((s) => {
+      s.providers.agentrouter = {
+        ...s.providers.agentrouter,
+        connected: Boolean(key),
+        model: AGENTROUTER_MODEL,
+        models: [{ id: AGENTROUTER_MODEL, name: 'Claude Opus 4.8' }],
+        effort: AGENTROUTER_EFFORT,
+        endpoint: AGENTROUTER_ENDPOINT,
+        lastCheck: new Date().toISOString(),
+        detail: key ? 'Encrypted API key stored · Claude Opus 4.8 · medium effort' : keyError ? `Stored key could not be decrypted: ${keyError.message}` : 'Not connected'
+      };
+    });
+    return this.store.getState().providers.agentrouter;
+  }
+
+  async runAgentRouter({ prompt, signal, responseMode = 'json', systemPrompt = '' }) {
+    const key = this.getSecret('agentrouter-api-key');
+    if (!key) throw new Error('AgentRouter is not connected. Add its API key on the Providers page.');
+    return this.requestAgentRouter({ apiKey: key, prompt, signal, responseMode, systemPrompt });
   }
 
   async findOllama() {
@@ -521,35 +644,86 @@ class ProviderManager {
     return this.detectOllama();
   }
 
-  async runOllama({ prompt, model, signal, responseMode = 'json' }) {
+  async runOllama({ prompt, model, signal, responseMode = 'json', systemPrompt = '' }) {
     const state = await this.detectOllama();
     if (!state.connected) throw new Error(state.detail || 'Ollama is not connected.');
     const selected = model || state.model;
     if (!selected) throw new Error('No Ollama model is selected. Download and select a local model first.');
     const body = {
       model: selected,
-      stream: false,
-      messages: [{ role: 'user', content: prompt }],
-      options: { temperature: responseMode === 'json' ? 0.2 : 0.45, num_ctx: 16384 }
+      stream: true,
+      keep_alive: '10m',
+      messages: [...(systemPrompt ? [{ role: 'system', content: String(systemPrompt) }] : []), { role: 'user', content: prompt }],
+      options: { temperature: responseMode === 'json' ? 0.2 : 0.45, num_ctx: 24576 }
     };
     if (responseMode === 'json') body.format = 'json';
-    const response = await fetch(`${state.endpoint || OLLAMA_ENDPOINT}/api/chat`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      signal,
-      body: JSON.stringify(body)
-    });
-    const raw = await response.text();
-    if (!response.ok) throw new Error(`Ollama request failed (${response.status}): ${raw.slice(0, 500)}`);
-    const data = JSON.parse(raw);
-    const text = data.message?.content || '';
-    return { text, json: responseMode === 'json' ? parseLooseJson(text) : null, raw: data };
+    let response;
+    try {
+      response = await fetch(`${state.endpoint || OLLAMA_ENDPOINT}/api/chat`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        signal,
+        body: JSON.stringify(body)
+      });
+    } catch (error) {
+      if (signal?.aborted || error?.name === 'AbortError') throw error;
+      const detail = error?.cause?.code || error?.cause?.message || error?.message;
+      throw new Error(`Ollama connection failed${detail ? ` (${detail})` : ''}. Confirm Ollama is running and the selected model is available.`);
+    }
+    if (!response.ok || !response.body) {
+      const raw = await response.text();
+      throw new Error(`Ollama request failed (${response.status}): ${raw.slice(0, 500)}`);
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    const events = [];
+    let buffer = '';
+    let text = '';
+    let lastProgressAt = 0;
+    const consumeLine = (line) => {
+      if (!line.trim()) return;
+      let event;
+      try { event = JSON.parse(line); }
+      catch { throw new Error('Ollama returned an invalid streaming response.'); }
+      if (event.error) throw new Error(`Ollama generation failed: ${event.error}`);
+      events.push(event);
+      text += event.message?.content || '';
+      const now = Date.now();
+      if (now - lastProgressAt > 750 || event.done) {
+        this.emit('provider-progress', {
+          provider: 'ollama',
+          status: event.done ? `${selected} finished generating.` : `${selected} is generating…`,
+          percent: null
+        });
+        lastProgressAt = now;
+      }
+    };
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split(/\r?\n/);
+        buffer = lines.pop() || '';
+        for (const line of lines) consumeLine(line);
+      }
+      buffer += decoder.decode();
+      if (buffer.trim()) consumeLine(buffer);
+    } catch (error) {
+      if (signal?.aborted || error?.name === 'AbortError' || /^Ollama (returned|generation)/.test(error?.message || '')) throw error;
+      const detail = error?.cause?.code || error?.cause?.message || error?.message;
+      throw new Error(`Ollama stream was interrupted${detail ? ` (${detail})` : ''}. Keep Ollama running, then use Run again for this agent.`);
+    }
+    return { text, json: responseMode === 'json' ? parseLooseJson(text) : null, raw: events.at(-1) || null };
   }
 
   async run(provider, options) {
     if (provider === 'codex') return this.runCodex(options);
     if (provider === 'gemini') return this.runGemini(options);
     if (provider === 'ollama') return this.runOllama(options);
+    if (provider === 'agentrouter') return this.runAgentRouter(options);
     throw new Error(`Unsupported provider: ${provider}`);
   }
 
@@ -560,4 +734,18 @@ class ProviderManager {
   }
 }
 
-module.exports = { ProviderManager, parseLooseJson, buildCodexExecArgs, OLLAMA_ENDPOINT, OLLAMA_WINDOWS_INSTALLER, ollamaCandidatePaths, formatBytes };
+module.exports = {
+  ProviderManager,
+  parseLooseJson,
+  buildCodexExecArgs,
+  buildAgentRouterRequest,
+  extractAnthropicText,
+  AGENTROUTER_ENDPOINT,
+  AGENTROUTER_MODEL,
+  AGENTROUTER_EFFORT,
+  AGENTROUTER_USER_AGENT,
+  OLLAMA_ENDPOINT,
+  OLLAMA_WINDOWS_INSTALLER,
+  ollamaCandidatePaths,
+  formatBytes
+};

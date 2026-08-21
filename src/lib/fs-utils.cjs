@@ -80,9 +80,14 @@ function snapshotProject(root, limits = {}) {
   const maxTotal = limits.maxTotal || 50 * 1024 * 1024;
   const maxFile = limits.maxFile || 2 * 1024 * 1024;
   const files = {};
+  const excludedFiles = [];
   let total = 0;
   for (const item of listFiles(root, { maxFiles: 5000, maxDepth: 20 })) {
-    if (item.type !== 'file' || item.size > maxFile || total + item.size > maxTotal) continue;
+    if (item.type !== 'file') continue;
+    if (item.size > maxFile || total + item.size > maxTotal) {
+      excludedFiles.push(item.path);
+      continue;
+    }
     const full = path.join(root, item.path);
     try {
       const data = fs.readFileSync(full);
@@ -90,7 +95,7 @@ function snapshotProject(root, limits = {}) {
       total += data.length;
     } catch {}
   }
-  return { files, totalBytes: total };
+  return { files, excludedFiles, totalBytes: total };
 }
 
 function sha256(data) {

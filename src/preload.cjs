@@ -26,6 +26,9 @@ contextBridge.exposeInMainWorld('noor', {
     geminiConnect: (key) => invoke('provider:gemini-connect', key),
     geminiDisconnect: () => invoke('provider:gemini-disconnect'),
     geminiRefresh: () => invoke('provider:gemini-refresh'),
+    agentRouterConnect: (key) => invoke('provider:agentrouter-connect', key),
+    agentRouterDisconnect: () => invoke('provider:agentrouter-disconnect'),
+    agentRouterRefresh: () => invoke('provider:agentrouter-refresh'),
     ollamaDetect: () => invoke('provider:ollama-detect'),
     ollamaInstall: () => invoke('provider:ollama-install'),
     ollamaStart: () => invoke('provider:ollama-start'),
@@ -46,6 +49,8 @@ contextBridge.exposeInMainWorld('noor', {
     plan: (goal) => invoke('orchestrator:plan', goal),
     run: (request) => invoke('orchestrator:run', request),
     cancel: (runId) => invoke('orchestrator:cancel', runId),
+    retryAgent: (runId, agentId) => invoke('orchestrator:retry-agent', runId, agentId),
+    reviewEdits: (runId, decision) => invoke('orchestrator:review-edits', runId, decision),
     deleteRun: (runId) => invoke('orchestrator:delete-run', runId)
   },
   contexts: {

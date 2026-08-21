@@ -114,17 +114,18 @@ function registerIpc() {
     for (const child of previewProcesses.values()) { try { child.kill(); } catch {} }
     previewProcesses.clear();
     try { providers.shutdown(); } catch {}
+    orchestrator.resetReviewSnapshots();
     contexts.reset();
     const state = store.reset();
     providers = new ProviderManager({ store, safeStorage, userData: app.getPath('userData'), emit });
     contexts = new SharedContextManager(app.getPath('userData'));
-    orchestrator = new Orchestrator({ store, providers, contexts, emit });
+    orchestrator = new Orchestrator({ store, providers, contexts, emit, userData: app.getPath('userData') });
     emit('state-changed', state);
     return state;
   }));
 
   ipcMain.handle('provider:refresh-all', wrap(async () => {
-    await Promise.allSettled([providers.detectCodex(), providers.refreshGemini(), providers.detectOllama()]);
+    await Promise.allSettled([providers.detectCodex(), providers.refreshGemini(), providers.detectOllama(), providers.refreshAgentRouter()]);
     emit('state-changed', store.getState());
     return store.getState().providers;
   }));
@@ -136,6 +137,9 @@ function registerIpc() {
   ipcMain.handle('provider:gemini-connect', wrap((key) => providers.connectGemini(key)));
   ipcMain.handle('provider:gemini-disconnect', wrap(() => providers.disconnectGemini()));
   ipcMain.handle('provider:gemini-refresh', wrap(() => providers.refreshGemini()));
+  ipcMain.handle('provider:agentrouter-connect', wrap((key) => providers.connectAgentRouter(key)));
+  ipcMain.handle('provider:agentrouter-disconnect', wrap(() => providers.disconnectAgentRouter()));
+  ipcMain.handle('provider:agentrouter-refresh', wrap(() => providers.refreshAgentRouter()));
   ipcMain.handle('provider:ollama-detect', wrap(() => providers.detectOllama()));
   ipcMain.handle('provider:ollama-install', wrap(() => providers.installOllama()));
   ipcMain.handle('provider:ollama-start', wrap(() => providers.startOllama()));
@@ -148,7 +152,8 @@ function registerIpc() {
     const urls = {
       codex: 'https://developers.openai.com/codex/cli',
       gemini: 'https://aistudio.google.com/app/apikey',
-      ollama: 'https://ollama.com/download/windows'
+      ollama: 'https://ollama.com/download/windows',
+      agentrouter: 'https://agentrouter.org'
     };
     if (!urls[kind]) throw new Error('Unknown provider link.');
     await shell.openExternal(urls[kind]);
@@ -185,6 +190,8 @@ function registerIpc() {
     return project;
   }));
   ipcMain.handle('project:remove', wrap(async (projectId) => {
+    const blockingRun = store.getState().runs.find((run) => run.projectId === projectId && (run.status === 'running' || run.review?.status === 'pending'));
+    if (blockingRun) throw new Error(blockingRun.status === 'running' ? 'Stop the active agent run before removing this project.' : 'Accept or reject the pending agent edits before removing this project.');
     store.mutate((s) => { s.projects = s.projects.filter((p) => p.id !== projectId); });
     emit('state-changed', store.getState());
     return true;
@@ -203,6 +210,9 @@ function registerIpc() {
     return { path: relative, content: fs.readFileSync(file, 'utf8') };
   }));
   ipcMain.handle('project:save-file', wrap(async (projectId, relative, content) => {
+    if (store.getState().runs.some((run) => run.projectId === projectId && run.review?.status === 'pending')) {
+      throw new Error('Accept or reject the pending agent edits before editing project files manually.');
+    }
     const project = getProject(projectId);
     const file = assertInside(project.path, path.join(project.path, relative));
     atomicWrite(file, String(content));
@@ -213,10 +223,14 @@ function registerIpc() {
   ipcMain.handle('orchestrator:plan', wrap(async (goal) => orchestrator.plan(goal)));
   ipcMain.handle('orchestrator:run', wrap(async (request) => orchestrator.run(request)));
   ipcMain.handle('orchestrator:cancel', wrap(async (runId) => orchestrator.cancel(runId)));
+  ipcMain.handle('orchestrator:retry-agent', wrap(async (runId, agentId) => orchestrator.retryAgent(runId, agentId)));
+  ipcMain.handle('orchestrator:review-edits', wrap(async (runId, decision) => orchestrator.reviewRun(runId, decision)));
   ipcMain.handle('orchestrator:delete-run', wrap(async (runId) => {
     const run = store.getState().runs.find((item) => item.id === runId);
     if (!run) throw new Error('Agent run not found.');
     if (run.status === 'running') throw new Error('Stop this run before deleting it.');
+    if (run.review?.status === 'pending') throw new Error('Accept or reject this run’s edits before deleting its history.');
+    orchestrator.discardReviewSnapshot(runId);
     const state = store.mutate((s) => { s.runs = s.runs.filter((item) => item.id !== runId); });
     emit('state-changed', state);
     return state;
@@ -372,13 +386,13 @@ app.whenReady().then(() => {
   store = new LocalStore(app.getPath('userData'));
   providers = new ProviderManager({ store, safeStorage, userData: app.getPath('userData'), emit });
   contexts = new SharedContextManager(app.getPath('userData'));
-  orchestrator = new Orchestrator({ store, providers, contexts, emit });
+  orchestrator = new Orchestrator({ store, providers, contexts, emit, userData: app.getPath('userData') });
   registerIpc();
   createWindow();
   mainWindow.webContents.on('render-process-gone', (_event, details) => {
     appendCrashLog(`Renderer process ended: ${details.reason}`, new Error(`Exit code: ${details.exitCode}`));
   });
-  Promise.allSettled([providers.detectCodex(), providers.refreshGemini(), providers.detectOllama()]).then(() => emit('state-changed', store.getState()));
+  Promise.allSettled([providers.detectCodex(), providers.refreshGemini(), providers.detectOllama(), providers.refreshAgentRouter()]).then(() => emit('state-changed', store.getState()));
 }).catch((error) => {
   appendCrashLog('Application startup failed', error);
   try { dialog.showErrorBox('Noor AI Studio could not start', `${error?.message || error}
