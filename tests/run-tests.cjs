@@ -20,10 +20,20 @@ const {
   buildCodexExecArgs,
   buildAgentRouterRequest,
   extractAnthropicText,
+  buildOpenRouterRequest,
+  extractOpenRouterText,
   AGENTROUTER_ENDPOINT,
   AGENTROUTER_MODEL,
   AGENTROUTER_EFFORT,
   AGENTROUTER_USER_AGENT,
+  OPENROUTER_ENDPOINT,
+  OPENROUTER_KEY_ENDPOINT,
+  OPENROUTER_MODEL_ENDPOINT,
+  OPENROUTER_MODEL,
+  OPENROUTER_EFFORT,
+  OPENROUTER_MAX_TOKENS,
+  OLLAMA_OUTPUT_TOKEN_LIMIT,
+  OLLAMA_STRUCTURED_OUTPUT_BUDGET_PROMPT,
   OLLAMA_WINDOWS_INSTALLER,
   formatBytes
 } = require('../src/lib/providers.cjs');
@@ -39,6 +49,8 @@ try {
   assert.equal(new LocalStore(path.join(temp, 'state')).getState().settings.ownerLabel, 'Noor');
   assert.equal(store.getState().providers.agentrouter.model, 'claude-opus-4-8');
   assert.equal(store.getState().providers.agentrouter.effort, 'medium');
+  assert.equal(store.getState().providers.openrouter.model, 'z-ai/glm-5.2:free');
+  assert.equal(store.getState().providers.openrouter.effort, 'high');
   const event = store.appendEvent({ level: 'info', message: 'test' });
   assert.equal(store.readEvents(10)[0].id, event.id);
 
@@ -115,6 +127,9 @@ try {
   assert.match(STRUCTURED_AGENT_SYSTEM_PROMPT, /complete final contents/);
   assert.deepEqual(STRUCTURED_FILE_RESPONSE_SCHEMA.required, ['summary', 'files', 'notes']);
   assert.match(OLLAMA_WINDOWS_INSTALLER, /^https:\/\/ollama\.com\//);
+  assert.equal(OLLAMA_OUTPUT_TOKEN_LIMIT, 12288);
+  assert.match(OLLAMA_STRUCTURED_OUTPUT_BUDGET_PROMPT, /entire response must fit within 12,288 output tokens/);
+  assert.match(OLLAMA_STRUCTURED_OUTPUT_BUDGET_PROMPT, /highest-priority coherent subset/);
   assert.equal(formatBytes(1024 * 1024), '1.0 MB');
 
   const agentRouterBody = buildAgentRouterRequest('Review this project.');
@@ -126,6 +141,19 @@ try {
   assert.deepEqual(agentRouterBody.output_config, { effort: 'medium' });
   assert.equal(agentRouterBody.messages[0].content, 'Review this project.');
   assert.equal(extractAnthropicText({ content: [{ type: 'thinking', thinking: 'private' }, { type: 'text', text: 'Ready' }] }), 'Ready');
+
+  const openRouterBody = buildOpenRouterRequest('Review this project.', { systemPrompt: 'Be precise.', responseMode: 'json' });
+  assert.equal(OPENROUTER_ENDPOINT, 'https://openrouter.ai/api/v1/chat/completions');
+  assert.equal(OPENROUTER_KEY_ENDPOINT, 'https://openrouter.ai/api/v1/key');
+  assert.equal(OPENROUTER_MODEL_ENDPOINT, 'https://openrouter.ai/api/v1/model/z-ai/glm-5.2:free');
+  assert.equal(OPENROUTER_MODEL, 'z-ai/glm-5.2:free');
+  assert.equal(OPENROUTER_EFFORT, 'high');
+  assert.equal(OPENROUTER_MAX_TOKENS, 65536);
+  assert.equal(openRouterBody.model, OPENROUTER_MODEL);
+  assert.deepEqual(openRouterBody.reasoning, { effort: 'high' });
+  assert.deepEqual(openRouterBody.response_format, { type: 'json_object' });
+  assert.deepEqual(openRouterBody.messages.map((message) => message.role), ['system', 'user']);
+  assert.equal(extractOpenRouterText({ content: [{ type: 'text', text: 'Ready' }] }), 'Ready');
 
   const providerStore = new LocalStore(path.join(temp, 'provider-state'));
   const safeStorage = {
@@ -160,6 +188,39 @@ try {
     global.fetch = originalFetch;
   }
 
+  const openRouterRequests = [];
+  global.fetch = async (url, options = {}) => {
+    openRouterRequests.push({ url, options, body: options.body ? JSON.parse(options.body) : null });
+    if (url === OPENROUTER_KEY_ENDPOINT) return { ok: true, status: 200 };
+    if (url === OPENROUTER_MODEL_ENDPOINT) return { ok: true, status: 200, json: async () => ({ data: { id: OPENROUTER_MODEL } }) };
+    return { ok: true, status: 200, text: async () => JSON.stringify({ choices: [{ finish_reason: 'stop', message: { reasoning: 'Checked carefully.', content: '{"summary":"glm ok"}' } }], usage: { completion_tokens: 24 } }) };
+  };
+  try {
+    await providerManager.connectOpenRouter('sk-or-secret-test-key');
+    assert.equal(providerStore.getState().providers.openrouter.connected, true);
+    assert.equal(providerStore.getState().providers.openrouter.effort, 'high');
+    assert.ok(providerStore.getState().settings.defaultParticipants.includes('openrouter'));
+    assert.equal(openRouterRequests[0].url, OPENROUTER_KEY_ENDPOINT);
+    assert.equal(openRouterRequests[0].options.headers.authorization, 'Bearer sk-or-secret-test-key');
+    assert.equal(openRouterRequests[1].url, OPENROUTER_MODEL_ENDPOINT);
+    const secretEnvelope = providerStore.readSecretsEnvelope();
+    assert.ok(secretEnvelope.items['openrouter-api-key']?.encrypted);
+    assert.doesNotMatch(JSON.stringify(secretEnvelope), /sk-or-secret-test-key/);
+    const glmResult = await providerManager.run('openrouter', { prompt: 'Return JSON.', responseMode: 'json' });
+    assert.equal(glmResult.json.summary, 'glm ok');
+    assert.equal(glmResult.reasoning, 'Checked carefully.');
+    assert.equal(openRouterRequests[2].url, OPENROUTER_ENDPOINT);
+    assert.equal(openRouterRequests[2].options.headers.authorization, 'Bearer sk-or-secret-test-key');
+    assert.equal(openRouterRequests[2].body.model, OPENROUTER_MODEL);
+    assert.equal(openRouterRequests[2].body.max_tokens, OPENROUTER_MAX_TOKENS);
+    assert.deepEqual(openRouterRequests[2].body.reasoning, { effort: 'high' });
+    await providerManager.disconnectOpenRouter();
+    assert.equal(providerStore.getState().providers.openrouter.connected, false);
+    assert.equal(providerStore.readSecretsEnvelope().items['openrouter-api-key'], undefined);
+  } finally {
+    global.fetch = originalFetch;
+  }
+
   providerManager.setSecret('gemini-api-key', 'gemini-secret-test-key');
   providerStore.mutate((s) => {
     s.providers.gemini = { ...s.providers.gemini, connected: true, model: 'gemini-test', models: [{ id: 'gemini-test', name: 'Gemini Test', outputTokenLimit: 12000 }] };
@@ -176,6 +237,7 @@ try {
     assert.equal(geminiResult.json.summary, 'done');
     assert.equal(geminiResult.finishReason, 'STOP');
     assert.match(geminiRequestBody.systemInstruction.parts[0].text, /file-editing software agent/);
+    assert.doesNotMatch(geminiRequestBody.systemInstruction.parts[0].text, /OLLAMA OUTPUT BUDGET/);
     assert.deepEqual(geminiRequestBody.generationConfig.responseSchema.required, ['summary', 'files', 'notes']);
     assert.equal(geminiRequestBody.generationConfig.responseMimeType, 'application/json');
     assert.equal(geminiRequestBody.generationConfig.maxOutputTokens, 12000);
@@ -212,8 +274,33 @@ try {
     assert.equal(ollamaRequestBody.stream, true);
     assert.equal(ollamaRequestBody.keep_alive, '10m');
     assert.equal(ollamaRequestBody.messages[0].role, 'system');
+    assert.match(ollamaRequestBody.messages[0].content, /12,288 output tokens/);
+    assert.match(ollamaRequestBody.messages[0].content, /Never truncate a file, JSON string, array, or object/);
     assert.equal(ollamaRequestBody.options.num_ctx, 24576);
+    assert.equal(ollamaRequestBody.options.num_predict, OLLAMA_OUTPUT_TOKEN_LIMIT);
     assert.ok(ollamaProgress.some((item) => /finished generating/.test(item.payload.status)));
+    assert.ok(ollamaProgress.some((item) => item.payload.generatedTokens === 2 && item.payload.tokenLimit === OLLAMA_OUTPUT_TOKEN_LIMIT));
+  } finally {
+    global.fetch = originalFetch;
+    providerManager.detectOllama = originalDetectOllama;
+  }
+
+  providerManager.detectOllama = async () => ({ connected: true, endpoint: 'http://127.0.0.1:11434', model: 'gemma3:latest' });
+  global.fetch = async () => {
+    let read = false;
+    const truncated = encoder.encode(`{"message":{"content":"{"},"done":true,"done_reason":"length","eval_count":${OLLAMA_OUTPUT_TOKEN_LIMIT}}\n`);
+    return {
+      ok: true,
+      status: 200,
+      body: { getReader: () => ({ read: async () => read ? { done: true } : (read = true, { done: false, value: truncated }) }) },
+      text: async () => ''
+    };
+  };
+  try {
+    await assert.rejects(
+      () => providerManager.runOllama({ prompt: 'Generate a very large result.', responseMode: 'json' }),
+      /reached the 12,288-token output limit/
+    );
   } finally {
     global.fetch = originalFetch;
     providerManager.detectOllama = originalDetectOllama;
@@ -277,6 +364,14 @@ try {
   );
   assert.equal(claudeAssignment[0].provider, 'agentrouter');
   assert.equal(claudeAssignment[0].model, 'claude-opus-4-8');
+  const glmAssignment = assignProviders(
+    [{ role: 'Reviewer' }],
+    ['openrouter'],
+    {},
+    { openrouter: { connected: true, model: OPENROUTER_MODEL } }
+  );
+  assert.equal(glmAssignment[0].provider, 'openrouter');
+  assert.equal(glmAssignment[0].model, OPENROUTER_MODEL);
 
   // Prove that a later provider receives the earlier provider's contribution
   // from the same canonical transcript, rather than operating in isolation.
@@ -391,6 +486,30 @@ try {
   assert.equal(fs.existsSync(path.join(projectDir, 'retry-result.txt')), false);
   await assert.rejects(() => retryRunner.retryAgent(continuationRun.id, continuationRun.agents[1].id), /Only a failed agent/);
 
+  store.mutate((s) => { s.providers.ollama = { ...s.providers.ollama, connected: true, model: 'gemma3:latest' }; });
+  const agentProgressEvents = [];
+  const tokenProgressProviders = {
+    connectedProviderIds: () => ['ollama'],
+    run: async (_provider, options) => {
+      options.onEvent?.({ type: 'generation.progress', provider: 'ollama', generatedTokens: 4096, tokenLimit: OLLAMA_OUTPUT_TOKEN_LIMIT, percent: 33, elapsedMs: 120000, tokensPerSecond: 34.13, done: false });
+      return {
+        json: { summary: 'QA completed within the token allowance.', files: [], notes: [] },
+        usage: { generatedTokens: 4200, tokenLimit: OLLAMA_OUTPUT_TOKEN_LIMIT, elapsedMs: 123000, tokensPerSecond: 34.15, doneReason: 'stop' }
+      };
+    }
+  };
+  const tokenProgressRunner = new Orchestrator({ store, providers: tokenProgressProviders, contexts, emit: (channel, payload) => { if (channel === 'agent-progress') agentProgressEvents.push(payload); } });
+  const tokenProgressRun = await tokenProgressRunner.run({
+    projectId: 'shared-project', goal: 'Validate token progress.', participants: ['ollama'],
+    plan: { id: 'token-progress-plan', goal: 'Validate token progress.', roles: [{ role: 'QA', purpose: 'Validate the implementation.', writes: true }] }
+  });
+  assert.equal(agentProgressEvents.length, 1);
+  assert.equal(agentProgressEvents[0].generatedTokens, 4096);
+  assert.equal(agentProgressEvents[0].runId, tokenProgressRun.id);
+  assert.equal(tokenProgressRun.agents[0].progress.generatedTokens, 4200);
+  assert.equal(tokenProgressRun.agents[0].progress.tokenLimit, OLLAMA_OUTPUT_TOKEN_LIMIT);
+  tokenProgressRunner.reviewRun(tokenProgressRun.id, 'reject');
+
   let activeAgents = 0;
   let maximumActiveAgents = 0;
   let parallelCall = 0;
@@ -447,6 +566,11 @@ try {
   assert.match(rendererSource, /Agent ·/);
   assert.match(rendererSource, /Run \$\{esc\(a\.role\)\} again/);
   assert.match(rendererSource, /retryAgent/);
+  assert.match(rendererSource, /output allowance/);
+  assert.match(rendererSource, /onAgentProgress/);
+  assert.match(rendererSource, /GLM 5\.2 Free/);
+  assert.match(rendererSource, /submit-openrouter-key/);
+  assert.match(rendererSource, /automaticProviderIds\.length/);
 
   const resetDir = path.join(temp, 'reset-state');
   const resetStore = new LocalStore(resetDir);

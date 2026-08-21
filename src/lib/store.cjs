@@ -29,6 +29,7 @@ class LocalStore {
         gemini: { connected: false, model: 'gemini-2.5-flash', models: [], lastCheck: null },
         ollama: { connected: false, model: '', models: [], endpoint: 'http://127.0.0.1:11434', lastCheck: null },
         agentrouter: { connected: false, model: 'claude-opus-4-8', models: [{ id: 'claude-opus-4-8', name: 'Claude Opus 4.8' }], effort: 'medium', endpoint: 'https://agentrouter.org/v1/messages', lastCheck: null },
+        openrouter: { connected: false, model: 'z-ai/glm-5.2:free', models: [{ id: 'z-ai/glm-5.2:free', name: 'GLM 5.2 Free' }], effort: 'high', endpoint: 'https://openrouter.ai/api/v1/chat/completions', lastCheck: null },
         antigravity: { mode: 'manual-handoff', configured: true }
       },
       projects: [],
@@ -40,7 +41,7 @@ class LocalStore {
         approvalMode: 'safe-auto',
         ownerLabel: 'Noor',
         sharedContextRounds: 1,
-        defaultParticipants: ['codex', 'gemini', 'ollama', 'agentrouter']
+        defaultParticipants: ['codex', 'gemini', 'ollama', 'agentrouter', 'openrouter']
       }
     };
   }
@@ -55,6 +56,7 @@ class LocalStore {
         gemini: { ...defaults.providers.gemini, ...(parsed.providers?.gemini || {}) },
         ollama: { ...defaults.providers.ollama, ...(parsed.providers?.ollama || {}) },
         agentrouter: { ...defaults.providers.agentrouter, ...(parsed.providers?.agentrouter || {}) },
+        openrouter: { ...defaults.providers.openrouter, ...(parsed.providers?.openrouter || {}) },
         antigravity: { ...defaults.providers.antigravity, ...(parsed.providers?.antigravity || {}) }
       },
       projects: Array.isArray(parsed.projects) ? parsed.projects : [],

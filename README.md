@@ -3,13 +3,13 @@
 > **v0.2.4 runtime note:** Startup and local packaging are npm-free. The launcher downloads and SHA-256-verifies the official Electron Windows runtime directly, then builds a portable app without `node_modules` or `electron-builder`.
 
 
-A local desktop AI development workspace where OpenAI Codex, Gemini, and Ollama can participate in one project-scoped conversation and in the same specialist-agent workflow.
+A local desktop AI development workspace where OpenAI Codex, Gemini, Ollama, Claude Opus 4.8, and GLM 5.2 Free can participate in one project-scoped conversation and in the same specialist-agent workflow.
 
 ## What changed
 
 ### Shared Room
 
-The new **Shared Room** stores one canonical local transcript per project. Noor, Codex, Gemini, and Ollama messages are appended to the same NDJSON journal. Before responding, every selected provider receives:
+The new **Shared Room** stores one canonical local transcript per project. Noor and every selected provider append messages to the same NDJSON journal. Before responding, every selected provider receives:
 
 - the original user message;
 - the recent canonical transcript, including earlier provider replies;
@@ -75,6 +75,10 @@ The app validates a Google AI Studio key, encrypts it with Electron `safeStorage
 
 The app installs or detects the native Windows application, starts the localhost service, lists models, pulls models with progress, and sends local chat requests. It does not expose Ollama to the LAN or internet.
 
+### OpenRouter GLM 5.2 Free
+
+The app validates an OpenRouter API key and current availability of `z-ai/glm-5.2:free`, then encrypts the key using Electron `safeStorage`. Requests use OpenRouter's unified reasoning configuration at high effort and a structured JSON response contract for file-editing agents. Credentials are excluded from normal state, logs, diagnostics, and backups.
+
 ### Antigravity
 
 Manual handoff only. Noor AI Studio writes `.noor-ai/ANTIGRAVITY_HANDOFF.md`, copies its content, and opens the project folder. It does not access Antigravity credentials or act as an automatic provider.
@@ -99,7 +103,7 @@ The index is written atomically. Messages are append-only NDJSON records with pr
 - `.git` and `.noor-ai` writes from structured providers are blocked.
 - Shared Room runs Codex read-only and does not edit files.
 - Arbitrary shell commands are not exposed. Only a small visible validation allowlist is available.
-- Gemini keys are encrypted using Electron `safeStorage` and excluded from diagnostics/backups.
+- Gemini, AgentRouter, and OpenRouter keys are encrypted using Electron `safeStorage` and excluded from diagnostics/backups.
 - Codex credentials remain owned by the official Codex runtime.
 
 ## Known limits

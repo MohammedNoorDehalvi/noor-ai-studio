@@ -4,6 +4,7 @@ const crypto = require('node:crypto');
 const { buildContext, safeRelativePath, atomicWrite } = require('./fs-utils.cjs');
 const { providerLabel } = require('./shared-context.cjs');
 const { createBackup, compareBackupToProject, restoreBackupExact } = require('./backup.cjs');
+const { OLLAMA_OUTPUT_TOKEN_LIMIT } = require('./providers.cjs');
 
 function chooseRoles(goal) {
   const text = goal.toLowerCase();
@@ -65,7 +66,7 @@ function summarizeProviderEvent(event) {
 }
 
 function assignProviders(roles, participants, explicitAssignments = {}, providerState = {}) {
-  const available = [...new Set((participants || []).filter((id) => ['codex', 'gemini', 'ollama', 'agentrouter'].includes(id) && providerState[id]?.connected))];
+  const available = [...new Set((participants || []).filter((id) => ['codex', 'gemini', 'ollama', 'agentrouter', 'openrouter'].includes(id) && providerState[id]?.connected))];
   if (!available.length) throw new Error('Select at least one connected provider.');
   return roles.map((role, index) => {
     const requested = explicitAssignments?.[role.role]?.provider || explicitAssignments?.[role.role] || null;
@@ -298,7 +299,7 @@ class Orchestrator {
       `You are the ${role} specialist inside Noor AI Studio's shared multi-model workspace.`,
       `Purpose: ${purpose}`,
       `User goal: ${goal}`,
-      'The transcript below is canonical shared context. It includes contributions from Codex, Gemini, Ollama, and Noor. Read it before responding. Build on useful ideas, explicitly correct errors or disagreements, and avoid repeating work already completed.',
+      'The transcript below is canonical shared context. It may include contributions from Noor and any connected provider, including Codex, Gemini, Ollama, Claude, and GLM. Read it before responding. Build on useful ideas, explicitly correct errors or disagreements, and avoid repeating work already completed.',
       `SHARED TRANSCRIPT:\n${sharedTranscript || '(no prior messages)'}`,
       `CURRENT PROJECT FILE CONTEXT:\n${context || '(empty project)'}`,
       'Rules: Work only on this project. Do not use destructive commands, publish, deploy, push Git changes, access secrets, or modify files outside the project.',
@@ -334,18 +335,19 @@ class Orchestrator {
     return written;
   }
 
-  async requestStructuredAgentOutput({ runId, agent, prompt, signal }) {
+  async requestStructuredAgentOutput({ runId, agent, prompt, signal, onProgress }) {
     const request = (requestPrompt) => this.providers.run(agent.provider, {
       prompt: requestPrompt,
       model: agent.model,
       signal,
       responseMode: 'json',
       systemPrompt: STRUCTURED_AGENT_SYSTEM_PROMPT,
-      responseSchema: STRUCTURED_FILE_RESPONSE_SCHEMA
+      responseSchema: STRUCTURED_FILE_RESPONSE_SCHEMA,
+      onEvent: onProgress
     });
     const first = await request(prompt);
     try {
-      return validateStructuredPayload(first.json);
+      return { ...validateStructuredPayload(first.json), usage: first.usage || null };
     } catch (firstError) {
       const finish = first.finishReason ? ` Gemini finish reason: ${first.finishReason}.` : '';
       this.log(runId, 'warning', `${agent.role} returned malformed file output; asking ${providerLabel(agent.provider)} to correct it once.`, {
@@ -359,7 +361,7 @@ class Orchestrator {
       ].join('\n\n');
       const second = await request(correction);
       try {
-        return validateStructuredPayload(second.json);
+        return { ...validateStructuredPayload(second.json), usage: second.usage || null };
       } catch (secondError) {
         throw new Error(`${agent.role} returned invalid file output twice (${secondError.message}). No output from this agent was applied.`);
       }
@@ -478,7 +480,8 @@ class Orchestrator {
       agents: assignedRoles.map((r) => ({
         id: crypto.randomUUID(), role: r.role, purpose: r.purpose, writes: r.writes, custom: Boolean(r.custom),
         provider: r.provider, model: r.model || model || null, status: 'queued', summary: '', files: [], error: null,
-        startedAt: null, completedAt: null
+        startedAt: null, completedAt: null,
+        progress: r.provider === 'ollama' ? { generatedTokens: 0, tokenLimit: OLLAMA_OUTPUT_TOKEN_LIMIT, percent: 0, elapsedMs: 0, tokensPerSecond: 0, done: false } : null
       })),
       finalSummary: '',
       error: null,
@@ -493,6 +496,7 @@ class Orchestrator {
 
     const summaries = new Map();
     const executeAgent = async (agent) => {
+      let latestProgress = agent.progress ? { ...agent.progress } : null;
       if (controller.signal.aborted) throw new Error('Run cancelled by user.');
       this.updateRun(runId, (r) => {
         r.currentAgent = r.executionMode === 'sequential' ? agent.id : null;
@@ -540,9 +544,25 @@ class Orchestrator {
             writes: true,
             sharedTranscript: transcript
           });
-          const payload = await this.requestStructuredAgentOutput({ runId, agent, prompt, signal: controller.signal });
+          const payload = await this.requestStructuredAgentOutput({
+            runId,
+            agent,
+            prompt,
+            signal: controller.signal,
+            onProgress: (progress) => {
+              if (progress?.type !== 'generation.progress') return;
+              latestProgress = { ...progress };
+              this.emit('agent-progress', { runId, agentId: agent.id, ...latestProgress });
+            }
+          });
           files = this.applyStructuredFiles(project.path, payload);
           summary = payload.summary;
+          if (payload.usage) latestProgress = {
+            ...latestProgress,
+            ...payload.usage,
+            percent: Math.min(100, Math.round(Number(payload.usage.generatedTokens || 0) / Number(payload.usage.tokenLimit || 1) * 100)),
+            done: true
+          };
           if (Array.isArray(payload.notes) && payload.notes.length) summary += `\n${payload.notes.join('\n')}`;
         }
         summaries.set(agent.id, `${agent.role} (${providerLabel(agent.provider)}): ${summary.slice(0, 1800)}`);
@@ -556,6 +576,7 @@ class Orchestrator {
           target.status = 'completed';
           target.summary = summary;
           target.files = files;
+          if (latestProgress) target.progress = { ...latestProgress, done: true };
           target.completedAt = new Date().toISOString();
           r.activeAgents = r.activeAgents.filter((id) => id !== agent.id);
         });
@@ -566,6 +587,7 @@ class Orchestrator {
           const target = r.agents.find((a) => a.id === agent.id);
           target.status = cancelled ? 'cancelled' : 'failed';
           target.error = error.message;
+          if (latestProgress) target.progress = { ...latestProgress, done: false, interrupted: true };
           target.completedAt = new Date().toISOString();
           r.activeAgents = r.activeAgents.filter((id) => id !== agent.id);
         });

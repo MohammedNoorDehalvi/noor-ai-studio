@@ -2,7 +2,7 @@
 
 ## Goal
 
-Let OpenAI Codex, Gemini, and Ollama contribute to one project conversation without sharing credentials or depending on provider-private memory.
+Let OpenAI Codex, Gemini, Ollama, Claude Opus 4.8, and GLM 5.2 Free contribute to one project conversation without sharing credentials or depending on provider-private memory.
 
 ## Canonical record
 

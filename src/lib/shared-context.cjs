@@ -16,6 +16,7 @@ function providerLabel(provider) {
   if (provider === 'gemini') return 'Gemini';
   if (provider === 'ollama') return 'Ollama';
   if (provider === 'agentrouter') return 'Claude Opus 4.8';
+  if (provider === 'openrouter') return 'GLM 5.2 Free';
   if (provider === 'user') return 'Noor';
   return provider || 'System';
 }

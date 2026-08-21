@@ -6,12 +6,49 @@ const { executableExists, runProcess, findPortableNpm } = require('./process-uti
 const { replaceFileSync } = require('./atomic-file.cjs');
 
 const OLLAMA_ENDPOINT = 'http://127.0.0.1:11434';
+const OLLAMA_OUTPUT_TOKEN_LIMIT = 12288;
+const OLLAMA_STRUCTURED_OUTPUT_BUDGET_PROMPT = [
+  'OLLAMA OUTPUT BUDGET (HARD REQUIREMENT): Your entire response must fit within 12,288 output tokens.',
+  'Target no more than about 11,000 tokens so there is room to close every string, array, and the final JSON object.',
+  'Plan the response size before writing. Keep summary and notes brief. Include only files that are essential to a coherent, working result.',
+  'Because every file entry requires complete final contents, do not begin a file that cannot fit in full. Never truncate a file, JSON string, array, or object.',
+  'If the whole requested scope cannot fit, complete the highest-priority coherent subset, return valid JSON for that subset, and list the remaining work concisely in notes.',
+  'Finishing one valid, usable subset is better than attempting everything and returning invalid or cut-off JSON.'
+].join('\n');
 const OLLAMA_WINDOWS_INSTALLER = 'https://ollama.com/download/OllamaSetup.exe';
 const AGENTROUTER_ENDPOINT = 'https://agentrouter.org/v1/messages';
 const AGENTROUTER_MODEL = 'claude-opus-4-8';
 const AGENTROUTER_EFFORT = 'medium';
 const AGENTROUTER_USER_AGENT = 'claude-cli/2.1.0 (external, cli)';
+const OPENROUTER_ENDPOINT = 'https://openrouter.ai/api/v1/chat/completions';
+const OPENROUTER_KEY_ENDPOINT = 'https://openrouter.ai/api/v1/key';
+const OPENROUTER_MODEL_ENDPOINT = 'https://openrouter.ai/api/v1/model/z-ai/glm-5.2:free';
+const OPENROUTER_MODEL = 'z-ai/glm-5.2:free';
+const OPENROUTER_EFFORT = 'high';
+const OPENROUTER_MAX_TOKENS = 65536;
 
+function buildOpenRouterRequest(prompt, { maxTokens = OPENROUTER_MAX_TOKENS, systemPrompt = '', responseMode = 'json' } = {}) {
+  const request = {
+    model: OPENROUTER_MODEL,
+    messages: [
+      ...(systemPrompt ? [{ role: 'system', content: String(systemPrompt) }] : []),
+      { role: 'user', content: String(prompt || '') }
+    ],
+    reasoning: { effort: OPENROUTER_EFFORT },
+    max_tokens: maxTokens,
+    stream: false
+  };
+  if (responseMode === 'json') request.response_format = { type: 'json_object' };
+  return request;
+}
+
+function extractOpenRouterText(message) {
+  if (typeof message?.content === 'string') return message.content.trim();
+  if (Array.isArray(message?.content)) {
+    return message.content.map((part) => typeof part === 'string' ? part : part?.text || '').join('').trim();
+  }
+  return '';
+}
 function buildAgentRouterRequest(prompt, { maxTokens = 16000, systemPrompt = '' } = {}) {
   const request = {
     model: AGENTROUTER_MODEL,
@@ -127,7 +164,7 @@ class ProviderManager {
 
   connectedProviderIds() {
     const providers = this.store.getState().providers;
-    return ['codex', 'gemini', 'ollama', 'agentrouter'].filter((id) => Boolean(providers[id]?.connected));
+    return ['codex', 'gemini', 'ollama', 'agentrouter', 'openrouter'].filter((id) => Boolean(providers[id]?.connected));
   }
 
   managedCodexPath() {
@@ -447,6 +484,140 @@ class ProviderManager {
     return this.requestAgentRouter({ apiKey: key, prompt, signal, responseMode, systemPrompt });
   }
 
+  async validateOpenRouterKey(apiKey) {
+    const headers = { authorization: `Bearer ${apiKey}` };
+    let keyResponse;
+    let modelResponse;
+    try {
+      [keyResponse, modelResponse] = await Promise.all([
+        fetch(OPENROUTER_KEY_ENDPOINT, { headers, signal: AbortSignal.timeout(30000) }),
+        fetch(OPENROUTER_MODEL_ENDPOINT, { headers, signal: AbortSignal.timeout(30000) })
+      ]);
+    } catch (error) {
+      const timedOut = error?.name === 'TimeoutError' || /timeout|aborted due to timeout/i.test(error?.message || '');
+      throw new Error(timedOut ? 'OpenRouter did not respond within 30 seconds. Check your network and try again.' : `OpenRouter could not be reached: ${error?.cause?.message || error.message}`);
+    }
+    if (!keyResponse.ok) {
+      const raw = await keyResponse.text();
+      throw new Error(`OpenRouter rejected the API key (${keyResponse.status}): ${raw.slice(0, 500)}`);
+    }
+    if (!modelResponse.ok) {
+      const raw = await modelResponse.text();
+      throw new Error(`OpenRouter model check failed (${modelResponse.status}): ${raw.slice(0, 500)}`);
+    }
+    let modelData;
+    try { modelData = await modelResponse.json(); } catch { throw new Error('OpenRouter returned invalid model information.'); }
+    if (modelData?.data?.id !== OPENROUTER_MODEL) throw new Error('GLM 5.2 Free is not currently available through OpenRouter.');
+    return true;
+  }
+
+  async requestOpenRouter({ apiKey, prompt, signal, responseMode = 'json', maxTokens = OPENROUTER_MAX_TOKENS, systemPrompt = '' }) {
+    let response;
+    try {
+      response = await fetch(OPENROUTER_ENDPOINT, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${apiKey}`,
+          'x-title': 'Noor AI Studio'
+        },
+        signal: signal || AbortSignal.timeout(15 * 60 * 1000),
+        body: JSON.stringify(buildOpenRouterRequest(prompt, { maxTokens, systemPrompt, responseMode }))
+      });
+    } catch (error) {
+      if (signal?.aborted || error?.name === 'AbortError') throw error;
+      const timedOut = error?.name === 'TimeoutError' || /timeout|aborted due to timeout/i.test(error?.message || '');
+      throw new Error(timedOut ? 'GLM 5.2 Free exceeded 15 minutes. OpenRouter may be rate-limited or at capacity; use Run again for this agent.' : `OpenRouter connection failed: ${error?.cause?.message || error.message}`);
+    }
+    const raw = await response.text();
+    if (!response.ok) {
+      let detail = raw.slice(0, 800);
+      try { detail = JSON.parse(raw)?.error?.message || detail; } catch {}
+      throw new Error(`OpenRouter request failed (${response.status}): ${detail}`);
+    }
+    let data;
+    try { data = JSON.parse(raw); } catch { throw new Error('OpenRouter returned an invalid response.'); }
+    const message = data?.choices?.[0]?.message || {};
+    const text = extractOpenRouterText(message);
+    const reasoning = String(message.reasoning || message.reasoning_content || '').trim();
+    if (!text && !reasoning) throw new Error('GLM 5.2 Free returned an empty response.');
+    return {
+      text: text || reasoning,
+      reasoning,
+      json: responseMode === 'json' ? parseLooseJson(text) : null,
+      finishReason: data?.choices?.[0]?.finish_reason || null,
+      usage: data?.usage || null,
+      raw: data
+    };
+  }
+
+  async connectOpenRouter(apiKey) {
+    const key = String(apiKey || '').trim();
+    if (!key) throw new Error('OpenRouter API key is required.');
+    if (!this.safeStorage.isEncryptionAvailable()) throw new Error('Operating-system encryption is required before an OpenRouter key can be saved.');
+    await this.validateOpenRouterKey(key);
+    this.setSecret('openrouter-api-key', key);
+    this.store.mutate((s) => {
+      s.providers.openrouter = {
+        ...s.providers.openrouter,
+        connected: true,
+        model: OPENROUTER_MODEL,
+        models: [{ id: OPENROUTER_MODEL, name: 'GLM 5.2 Free' }],
+        effort: OPENROUTER_EFFORT,
+        endpoint: OPENROUTER_ENDPOINT,
+        lastCheck: new Date().toISOString(),
+        detail: 'OpenRouter key verified · GLM 5.2 Free · high effort'
+      };
+      if (!Array.isArray(s.settings.defaultParticipants)) s.settings.defaultParticipants = [];
+      if (!s.settings.defaultParticipants.includes('openrouter')) s.settings.defaultParticipants.push('openrouter');
+    });
+    return this.store.getState().providers.openrouter;
+  }
+
+  async disconnectOpenRouter() {
+    this.deleteSecret('openrouter-api-key');
+    this.store.mutate((s) => {
+      s.providers.openrouter = { ...s.providers.openrouter, connected: false, lastCheck: new Date().toISOString(), detail: 'Not connected' };
+    });
+    return this.store.getState().providers.openrouter;
+  }
+
+  async refreshOpenRouter() {
+    let key = null;
+    let keyError = null;
+    try { key = this.getSecret('openrouter-api-key'); } catch (error) { keyError = error; }
+    this.store.mutate((s) => {
+      s.providers.openrouter = {
+        ...s.providers.openrouter,
+        connected: Boolean(key),
+        model: OPENROUTER_MODEL,
+        models: [{ id: OPENROUTER_MODEL, name: 'GLM 5.2 Free' }],
+        effort: OPENROUTER_EFFORT,
+        endpoint: OPENROUTER_ENDPOINT,
+        lastCheck: new Date().toISOString(),
+        detail: key ? 'Encrypted OpenRouter key stored · GLM 5.2 Free · high effort' : keyError ? `Stored key could not be decrypted: ${keyError.message}` : 'Not connected'
+      };
+    });
+    return this.store.getState().providers.openrouter;
+  }
+
+  async runOpenRouter({ prompt, signal, responseMode = 'json', systemPrompt = '' }) {
+    const key = this.getSecret('openrouter-api-key');
+    if (!key) throw new Error('OpenRouter is not connected. Add its API key on the Providers page.');
+    try {
+      return await this.requestOpenRouter({ apiKey: key, prompt, signal, responseMode, systemPrompt });
+    } catch (error) {
+      if (/request failed \(401\)/i.test(error.message)) {
+        this.store.mutate((s) => {
+          s.providers.openrouter.connected = false;
+          s.providers.openrouter.lastCheck = new Date().toISOString();
+          s.providers.openrouter.detail = 'OpenRouter rejected the stored API key. Reconnect with a current key.';
+        });
+      }
+      throw error;
+    }
+  }
+
   async findOllama() {
     const fromPath = await executableExists(process.platform === 'win32' ? 'ollama.exe' : 'ollama') || await executableExists('ollama');
     if (fromPath) return fromPath;
@@ -644,17 +815,25 @@ class ProviderManager {
     return this.detectOllama();
   }
 
-  async runOllama({ prompt, model, signal, responseMode = 'json', systemPrompt = '' }) {
+  async runOllama({ prompt, model, signal, responseMode = 'json', systemPrompt = '', onEvent }) {
     const state = await this.detectOllama();
     if (!state.connected) throw new Error(state.detail || 'Ollama is not connected.');
     const selected = model || state.model;
     if (!selected) throw new Error('No Ollama model is selected. Download and select a local model first.');
+    const effectiveSystemPrompt = [
+      String(systemPrompt || '').trim(),
+      responseMode === 'json' ? OLLAMA_STRUCTURED_OUTPUT_BUDGET_PROMPT : ''
+    ].filter(Boolean).join('\n\n');
     const body = {
       model: selected,
       stream: true,
       keep_alive: '10m',
-      messages: [...(systemPrompt ? [{ role: 'system', content: String(systemPrompt) }] : []), { role: 'user', content: prompt }],
-      options: { temperature: responseMode === 'json' ? 0.2 : 0.45, num_ctx: 24576 }
+      messages: [...(effectiveSystemPrompt ? [{ role: 'system', content: effectiveSystemPrompt }] : []), { role: 'user', content: prompt }],
+      options: {
+        temperature: responseMode === 'json' ? 0.2 : 0.45,
+        num_ctx: 24576,
+        num_predict: OLLAMA_OUTPUT_TOKEN_LIMIT
+      }
     };
     if (responseMode === 'json') body.format = 'json';
     let response;
@@ -677,25 +856,46 @@ class ProviderManager {
 
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
-    const events = [];
+    const startedAt = Date.now();
+    let lastEvent = null;
     let buffer = '';
     let text = '';
+    let generatedTokens = 0;
     let lastProgressAt = 0;
+    const publishProgress = (event = null, done = false) => {
+      const elapsedMs = Math.max(0, Date.now() - startedAt);
+      const exactTokens = Number(event?.eval_count);
+      if (Number.isFinite(exactTokens)) generatedTokens = exactTokens;
+      const progress = {
+        type: 'generation.progress',
+        provider: 'ollama',
+        model: selected,
+        status: done ? `${selected} finished generating.` : generatedTokens ? `${selected} generated ${generatedTokens.toLocaleString()} of ${OLLAMA_OUTPUT_TOKEN_LIMIT.toLocaleString()} output tokens.` : `${selected} is preparing to generate…`,
+        generatedTokens,
+        tokenLimit: OLLAMA_OUTPUT_TOKEN_LIMIT,
+        percent: Math.min(100, Math.round(generatedTokens / OLLAMA_OUTPUT_TOKEN_LIMIT * 100)),
+        elapsedMs,
+        tokensPerSecond: elapsedMs > 0 ? Number((generatedTokens / (elapsedMs / 1000)).toFixed(2)) : 0,
+        done,
+        doneReason: event?.done_reason || null
+      };
+      onEvent?.(progress);
+      this.emit('provider-progress', progress);
+    };
+    publishProgress();
     const consumeLine = (line) => {
       if (!line.trim()) return;
       let event;
       try { event = JSON.parse(line); }
       catch { throw new Error('Ollama returned an invalid streaming response.'); }
       if (event.error) throw new Error(`Ollama generation failed: ${event.error}`);
-      events.push(event);
-      text += event.message?.content || '';
+      lastEvent = event;
+      const content = event.message?.content || '';
+      text += content;
+      if (content && !Number.isFinite(Number(event.eval_count))) generatedTokens += 1;
       const now = Date.now();
       if (now - lastProgressAt > 750 || event.done) {
-        this.emit('provider-progress', {
-          provider: 'ollama',
-          status: event.done ? `${selected} finished generating.` : `${selected} is generating…`,
-          percent: null
-        });
+        publishProgress(event, Boolean(event.done));
         lastProgressAt = now;
       }
     };
@@ -716,7 +916,26 @@ class ProviderManager {
       const detail = error?.cause?.code || error?.cause?.message || error?.message;
       throw new Error(`Ollama stream was interrupted${detail ? ` (${detail})` : ''}. Keep Ollama running, then use Run again for this agent.`);
     }
-    return { text, json: responseMode === 'json' ? parseLooseJson(text) : null, raw: events.at(-1) || null };
+    const json = responseMode === 'json' ? parseLooseJson(text) : null;
+    if (responseMode === 'json' && !json && lastEvent?.done_reason === 'length') {
+      throw new Error(`Ollama reached the ${OLLAMA_OUTPUT_TOKEN_LIMIT.toLocaleString()}-token output limit before completing valid JSON. Narrow the agent task or use a provider with a larger output allowance.`);
+    }
+    return {
+      text,
+      json,
+      raw: lastEvent,
+      finishReason: lastEvent?.done_reason || null,
+      usage: {
+        generatedTokens,
+        promptTokens: Number.isFinite(Number(lastEvent?.prompt_eval_count)) ? Number(lastEvent.prompt_eval_count) : null,
+        tokenLimit: OLLAMA_OUTPUT_TOKEN_LIMIT,
+        elapsedMs: Math.max(0, Date.now() - startedAt),
+        tokensPerSecond: Number(lastEvent?.eval_duration) > 0 && Number(lastEvent?.eval_count) >= 0
+          ? Number((Number(lastEvent.eval_count) / (Number(lastEvent.eval_duration) / 1e9)).toFixed(2))
+          : 0,
+        doneReason: lastEvent?.done_reason || null
+      }
+    };
   }
 
   async run(provider, options) {
@@ -724,6 +943,7 @@ class ProviderManager {
     if (provider === 'gemini') return this.runGemini(options);
     if (provider === 'ollama') return this.runOllama(options);
     if (provider === 'agentrouter') return this.runAgentRouter(options);
+    if (provider === 'openrouter') return this.runOpenRouter(options);
     throw new Error(`Unsupported provider: ${provider}`);
   }
 
@@ -740,11 +960,21 @@ module.exports = {
   buildCodexExecArgs,
   buildAgentRouterRequest,
   extractAnthropicText,
+  buildOpenRouterRequest,
+  extractOpenRouterText,
   AGENTROUTER_ENDPOINT,
   AGENTROUTER_MODEL,
   AGENTROUTER_EFFORT,
   AGENTROUTER_USER_AGENT,
+  OPENROUTER_ENDPOINT,
+  OPENROUTER_KEY_ENDPOINT,
+  OPENROUTER_MODEL_ENDPOINT,
+  OPENROUTER_MODEL,
+  OPENROUTER_EFFORT,
+  OPENROUTER_MAX_TOKENS,
   OLLAMA_ENDPOINT,
+  OLLAMA_OUTPUT_TOKEN_LIMIT,
+  OLLAMA_STRUCTURED_OUTPUT_BUDGET_PROMPT,
   OLLAMA_WINDOWS_INSTALLER,
   ollamaCandidatePaths,
   formatBytes

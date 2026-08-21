@@ -125,7 +125,7 @@ function registerIpc() {
   }));
 
   ipcMain.handle('provider:refresh-all', wrap(async () => {
-    await Promise.allSettled([providers.detectCodex(), providers.refreshGemini(), providers.detectOllama(), providers.refreshAgentRouter()]);
+    await Promise.allSettled([providers.detectCodex(), providers.refreshGemini(), providers.detectOllama(), providers.refreshAgentRouter(), providers.refreshOpenRouter()]);
     emit('state-changed', store.getState());
     return store.getState().providers;
   }));
@@ -140,6 +140,9 @@ function registerIpc() {
   ipcMain.handle('provider:agentrouter-connect', wrap((key) => providers.connectAgentRouter(key)));
   ipcMain.handle('provider:agentrouter-disconnect', wrap(() => providers.disconnectAgentRouter()));
   ipcMain.handle('provider:agentrouter-refresh', wrap(() => providers.refreshAgentRouter()));
+  ipcMain.handle('provider:openrouter-connect', wrap((key) => providers.connectOpenRouter(key)));
+  ipcMain.handle('provider:openrouter-disconnect', wrap(() => providers.disconnectOpenRouter()));
+  ipcMain.handle('provider:openrouter-refresh', wrap(() => providers.refreshOpenRouter()));
   ipcMain.handle('provider:ollama-detect', wrap(() => providers.detectOllama()));
   ipcMain.handle('provider:ollama-install', wrap(() => providers.installOllama()));
   ipcMain.handle('provider:ollama-start', wrap(() => providers.startOllama()));
@@ -153,7 +156,8 @@ function registerIpc() {
       codex: 'https://developers.openai.com/codex/cli',
       gemini: 'https://aistudio.google.com/app/apikey',
       ollama: 'https://ollama.com/download/windows',
-      agentrouter: 'https://agentrouter.org'
+      agentrouter: 'https://agentrouter.org',
+      openrouter: 'https://openrouter.ai/z-ai/glm-5.2:free'
     };
     if (!urls[kind]) throw new Error('Unknown provider link.');
     await shell.openExternal(urls[kind]);
@@ -392,7 +396,7 @@ app.whenReady().then(() => {
   mainWindow.webContents.on('render-process-gone', (_event, details) => {
     appendCrashLog(`Renderer process ended: ${details.reason}`, new Error(`Exit code: ${details.exitCode}`));
   });
-  Promise.allSettled([providers.detectCodex(), providers.refreshGemini(), providers.detectOllama(), providers.refreshAgentRouter()]).then(() => emit('state-changed', store.getState()));
+  Promise.allSettled([providers.detectCodex(), providers.refreshGemini(), providers.detectOllama(), providers.refreshAgentRouter(), providers.refreshOpenRouter()]).then(() => emit('state-changed', store.getState()));
 }).catch((error) => {
   appendCrashLog('Application startup failed', error);
   try { dialog.showErrorBox('Noor AI Studio could not start', `${error?.message || error}

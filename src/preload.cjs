@@ -29,6 +29,9 @@ contextBridge.exposeInMainWorld('noor', {
     agentRouterConnect: (key) => invoke('provider:agentrouter-connect', key),
     agentRouterDisconnect: () => invoke('provider:agentrouter-disconnect'),
     agentRouterRefresh: () => invoke('provider:agentrouter-refresh'),
+    openRouterConnect: (key) => invoke('provider:openrouter-connect', key),
+    openRouterDisconnect: () => invoke('provider:openrouter-disconnect'),
+    openRouterRefresh: () => invoke('provider:openrouter-refresh'),
     ollamaDetect: () => invoke('provider:ollama-detect'),
     ollamaInstall: () => invoke('provider:ollama-install'),
     ollamaStart: () => invoke('provider:ollama-start'),
@@ -74,6 +77,7 @@ contextBridge.exposeInMainWorld('noor', {
   events: {
     onStateChanged: (cb) => on('state-changed', cb),
     onRunUpdated: (cb) => on('run-updated', cb),
+    onAgentProgress: (cb) => on('agent-progress', cb),
     onActivity: (cb) => on('activity-event', cb),
     onProviderProgress: (cb) => on('provider-progress', cb),
     onTerminal: (cb) => on('terminal-output', cb),
