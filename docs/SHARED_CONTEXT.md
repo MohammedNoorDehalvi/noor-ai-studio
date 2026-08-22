@@ -2,7 +2,9 @@
 
 ## Goal
 
-Let OpenAI Codex, Gemini, Ollama, Claude Opus 4.8, and GLM 5.2 Free contribute to one project conversation without sharing credentials or depending on provider-private memory.
+Let OpenAI Codex, Gemini, Ollama, Ox Alpha, and TokenIn contribute to one project conversation without sharing credentials or depending on provider-private memory.
+
+TokenIn uses the project-selected default from `myt/gpt-5.6-sol-free` or `myt/claude-opus-4-8-free`. Both read the same persisted transcript as other providers, while the encrypted TokenIn key remains in the Electron main process. Saved selections from the former TokenIn model are migrated to GPT-5.6 SOL.
 
 ## Canonical record
 

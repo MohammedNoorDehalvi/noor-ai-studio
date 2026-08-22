@@ -4,9 +4,12 @@ const os = require('node:os');
 const { spawn } = require('node:child_process');
 const { executableExists, runProcess, findPortableNpm } = require('./process-utils.cjs');
 const { replaceFileSync } = require('./atomic-file.cjs');
+const { OX_ALPHA_MODEL, TOKENIN_MODELS, cloneOxAlphaModel, cloneTokenInModels } = require('./model-registry.cjs');
 
 const OLLAMA_ENDPOINT = 'http://127.0.0.1:11434';
 const OLLAMA_OUTPUT_TOKEN_LIMIT = 12288;
+const OLLAMA_TEXT_OUTPUT_TOKEN_LIMIT = 2048;
+const OLLAMA_TEXT_CONTEXT_WINDOW = 8192;
 const OLLAMA_STRUCTURED_OUTPUT_BUDGET_PROMPT = [
   'OLLAMA OUTPUT BUDGET (HARD REQUIREMENT): Your entire response must fit within 12,288 output tokens.',
   'Target no more than about 11,000 tokens so there is room to close every string, array, and the final JSON object.',
@@ -16,30 +19,174 @@ const OLLAMA_STRUCTURED_OUTPUT_BUDGET_PROMPT = [
   'Finishing one valid, usable subset is better than attempting everything and returning invalid or cut-off JSON.'
 ].join('\n');
 const OLLAMA_WINDOWS_INSTALLER = 'https://ollama.com/download/OllamaSetup.exe';
-const AGENTROUTER_ENDPOINT = 'https://agentrouter.org/v1/messages';
-const AGENTROUTER_MODEL = 'claude-opus-4-8';
-const AGENTROUTER_EFFORT = 'medium';
-const AGENTROUTER_USER_AGENT = 'claude-cli/2.1.0 (external, cli)';
 const OPENROUTER_ENDPOINT = 'https://openrouter.ai/api/v1/chat/completions';
 const OPENROUTER_KEY_ENDPOINT = 'https://openrouter.ai/api/v1/key';
-const OPENROUTER_MODEL_ENDPOINT = 'https://openrouter.ai/api/v1/model/z-ai/glm-5.2:free';
-const OPENROUTER_MODEL = 'z-ai/glm-5.2:free';
+const OPENROUTER_MODEL_ENDPOINT = 'https://openrouter.ai/api/v1/models/stealth/ox-alpha/endpoints';
+const OPENROUTER_MODEL = OX_ALPHA_MODEL.id;
 const OPENROUTER_EFFORT = 'high';
-const OPENROUTER_MAX_TOKENS = 65536;
+const OPENROUTER_MAX_TOKENS = OX_ALPHA_MODEL.outputTokenLimit;
+const OPENROUTER_CONTEXT_TOKENS = OX_ALPHA_MODEL.contextWindow;
+const OPENROUTER_MAX_ATTEMPTS = 3;
+const OPENROUTER_RETRYABLE_STATUSES = new Set([429, 502, 503, 504, 529]);
+const TOKENIN_ENDPOINT = 'https://tokenin.my.id/v1/chat/completions';
+const TOKENIN_MODELS_ENDPOINT = 'https://tokenin.my.id/v1/models';
+const TOKENIN_MAX_TOKENS = 4096;
+const TOKENIN_MAX_ATTEMPTS = 2;
+const TOKENIN_RETRYABLE_STATUSES = new Set([429, 502, 503, 504]);
+const TOKENIN_STRUCTURED_OUTPUT_BUDGET_PROMPT = [
+  'TOKENIN OUTPUT BUDGET (HARD REQUIREMENT): The API accepts at most 4,096 output tokens.',
+  'Use no more than about 2,800 tokens for the entire visible response so every string and the final JSON braces fit.',
+  'Return AT MOST ONE complete file in this agent cycle. Choose the single highest-priority file that makes coherent progress. Never start a file you cannot finish.',
+  'Do not spend the visible response on analysis, planning, or a walkthrough. The visible response is only the compact JSON object Noor can apply.',
+  'If even one useful file cannot fit, return files:[] with a brief summary and notes. Never fill the token allowance or truncate JSON.'
+].join('\n');
+const PROVIDER_MAX_ATTEMPTS = 3;
+const PROVIDER_RETRYABLE_STATUSES = new Set([408, 409, 429, 500, 502, 503, 504, 529]);
+const PROVIDER_REQUEST_TIMEOUT_MS = 10 * 60 * 1000;
 
-function buildOpenRouterRequest(prompt, { maxTokens = OPENROUTER_MAX_TOKENS, systemPrompt = '', responseMode = 'json' } = {}) {
+function openRouterContentPart(attachment) {
+  if (!attachment || typeof attachment !== 'object') throw new Error('OpenRouter attachments must be objects.');
+  if (attachment.type === 'image_url' || attachment.type === 'video_url') return JSON.parse(JSON.stringify(attachment));
+  const type = attachment.type === 'image' ? 'image_url' : attachment.type === 'video' ? 'video_url' : null;
+  const url = attachment.url || attachment.dataUrl;
+  if (!type || !url) throw new Error('OpenRouter attachments require type "image" or "video" and a URL or data URL.');
+  return { type, [type]: { url: String(url) } };
+}
+
+function buildOpenRouterRequest(prompt, {
+  maxTokens = OPENROUTER_MAX_TOKENS,
+  systemPrompt = '',
+  responseMode = 'json',
+  responseFormat = null,
+  stream = false,
+  messages = null,
+  attachments = [],
+  tools = null,
+  toolChoice = null
+} = {}) {
+  if (responseFormat?.type === 'json_schema') {
+    throw new Error('Ox Alpha supports JSON output, but strict JSON Schema enforcement is not guaranteed. Use json_object output instead.');
+  }
+  const userAttachments = Array.isArray(attachments) ? attachments.map(openRouterContentPart) : [];
+  const userContent = userAttachments.length
+    ? [{ type: 'text', text: String(prompt || '') }, ...userAttachments]
+    : String(prompt || '');
   const request = {
     model: OPENROUTER_MODEL,
-    messages: [
+    messages: Array.isArray(messages) && messages.length ? JSON.parse(JSON.stringify(messages)) : [
       ...(systemPrompt ? [{ role: 'system', content: String(systemPrompt) }] : []),
-      { role: 'user', content: String(prompt || '') }
+      { role: 'user', content: userContent }
     ],
     reasoning: { effort: OPENROUTER_EFFORT },
-    max_tokens: maxTokens,
-    stream: false
+    max_tokens: Math.max(1, Math.min(Number(maxTokens) || OPENROUTER_MAX_TOKENS, OPENROUTER_MAX_TOKENS)),
+    stream: Boolean(stream)
   };
-  if (responseMode === 'json') request.response_format = { type: 'json_object' };
+  if (stream) request.stream_options = { include_usage: true };
+  if (responseFormat) request.response_format = JSON.parse(JSON.stringify(responseFormat));
+  else if (responseMode === 'json') request.response_format = { type: 'json_object' };
+  if (Array.isArray(tools) && tools.length) request.tools = JSON.parse(JSON.stringify(tools));
+  if (toolChoice != null) request.tool_choice = JSON.parse(JSON.stringify(toolChoice));
   return request;
+}
+
+function tokenInModel(model) {
+  return TOKENIN_MODELS.find((item) => item.id === model) || null;
+}
+
+function buildTokenInRequest(prompt, {
+  model = TOKENIN_MODELS[0].id,
+  maxTokens = TOKENIN_MAX_TOKENS,
+  systemPrompt = '',
+  responseMode = 'json',
+  stream = true,
+  messages = null
+} = {}) {
+  if (!tokenInModel(model)) throw new Error(`TokenIn model is not supported by Noor: ${model}`);
+  const requestMessages = Array.isArray(messages) && messages.length
+    ? JSON.parse(JSON.stringify(messages))
+    : [
+        ...(systemPrompt ? [{ role: 'system', content: String(systemPrompt) }] : []),
+        { role: 'user', content: String(prompt || '') }
+      ];
+  return {
+    model,
+    messages: requestMessages,
+    temperature: responseMode === 'json' ? 0.1 : 0.45,
+    max_tokens: Math.max(1, Math.min(Number(maxTokens) || TOKENIN_MAX_TOKENS, TOKENIN_MAX_TOKENS)),
+    stream: Boolean(stream)
+  };
+}
+
+function tokenInErrorDetail(raw) {
+  try {
+    const parsed = JSON.parse(String(raw || ''));
+    return String(parsed?.error?.message || parsed?.message || parsed?.error || raw || '').replace(/\s+/g, ' ').trim().slice(0, 800);
+  } catch {
+    return String(raw || '').replace(/\s+/g, ' ').trim().slice(0, 800);
+  }
+}
+
+async function readTokenInStream(response, { model, signal, onEvent, startedAt = Date.now() } = {}) {
+  if (!response?.body?.getReader) throw new Error('TokenIn returned a streaming response without a readable body.');
+  const selected = tokenInModel(model) || TOKENIN_MODELS[0];
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let text = '';
+  let reasoning = '';
+  let usage = null;
+  let finishReason = null;
+  let completed = false;
+  const publish = (done = false) => {
+    const reported = Number(usage?.completion_tokens ?? usage?.output_tokens);
+    const exactTokenCount = Number.isFinite(reported);
+    const generatedTokens = exactTokenCount ? reported : finishReason === 'length' ? TOKENIN_MAX_TOKENS : Math.ceil((text.length + reasoning.length) / 4);
+    const elapsedMs = Math.max(0, Date.now() - startedAt);
+    onEvent?.({
+      type: 'generation.progress', provider: 'tokenin', model: selected.id,
+      status: done ? `${selected.name} finished generating.` : `${selected.name} is streaming through TokenIn…`,
+      generatedTokens, tokenLimit: TOKENIN_MAX_TOKENS,
+      percent: Math.min(100, Math.round(generatedTokens / TOKENIN_MAX_TOKENS * 100)),
+      elapsedMs, tokensPerSecond: elapsedMs > 0 ? Number((generatedTokens / (elapsedMs / 1000)).toFixed(2)) : 0,
+      liveTokenCounts: true, tokenCountEstimated: !exactTokenCount, done
+    });
+  };
+  const consumeLine = (line) => {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith(':') || !trimmed.startsWith('data:')) return;
+    const raw = trimmed.slice(5).trim();
+    if (raw === '[DONE]') { completed = true; return; }
+    let event;
+    try { event = JSON.parse(raw); } catch { throw new Error('TokenIn returned a malformed streaming event.'); }
+    if (event?.error) throw new Error(`TokenIn stream failed: ${tokenInErrorDetail(JSON.stringify(event))}`);
+    const choice = event?.choices?.[0] || {};
+    const delta = choice.delta || choice.message || {};
+    if (typeof delta.content === 'string') text += delta.content;
+    else if (Array.isArray(delta.content)) text += delta.content.map((part) => typeof part === 'string' ? part : part?.text || '').join('');
+    reasoning += String(delta.reasoning || delta.reasoning_content || '');
+    if (choice.finish_reason) { finishReason = choice.finish_reason; completed = true; }
+    if (event.usage) usage = event.usage;
+    publish(false);
+  };
+  publish(false);
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() || '';
+      for (const line of lines) consumeLine(line);
+    }
+    buffer += decoder.decode();
+    if (buffer.trim()) consumeLine(buffer);
+  } catch (error) {
+    if (signal?.aborted || error?.name === 'AbortError' || /^TokenIn (returned|stream failed)/.test(error?.message || '')) throw error;
+    throw new Error(`TokenIn's stream was interrupted: ${error?.cause?.message || error.message}. Use Run again for this agent.`);
+  }
+  if (!completed) throw new Error("TokenIn's stream ended before the completion marker. Use Run again for this agent.");
+  publish(true);
+  return { text: text.trim(), reasoning: reasoning.trim(), usage, finishReason, raw: { streamed: true } };
 }
 
 function extractOpenRouterText(message) {
@@ -49,22 +196,205 @@ function extractOpenRouterText(message) {
   }
   return '';
 }
-function buildAgentRouterRequest(prompt, { maxTokens = 16000, systemPrompt = '' } = {}) {
-  const request = {
-    model: AGENTROUTER_MODEL,
-    max_tokens: maxTokens,
-    thinking: { type: 'adaptive' },
-    output_config: { effort: AGENTROUTER_EFFORT },
-    messages: [{ role: 'user', content: String(prompt || '') }]
-  };
-  if (systemPrompt) request.system = String(systemPrompt);
-  return request;
+
+function mergeOpenRouterToolCalls(target, additions) {
+  for (const addition of additions || []) {
+    const index = Number.isInteger(addition?.index) ? addition.index : target.length;
+    const current = target[index] || { id: '', type: addition?.type || 'function', function: { name: '', arguments: '' } };
+    if (addition?.id) current.id += addition.id;
+    if (addition?.type) current.type = addition.type;
+    if (addition?.function?.name) current.function.name += addition.function.name;
+    if (addition?.function?.arguments) current.function.arguments += addition.function.arguments;
+    target[index] = current;
+  }
+  return target.filter(Boolean);
 }
 
-function extractAnthropicText(data) {
-  return (data?.content || [])
-    .filter((block) => block?.type === 'text')
-    .map((block) => block.text || '')
+async function readOpenRouterStream(response, { signal, onEvent, startedAt = Date.now() } = {}) {
+  if (!response?.body?.getReader) throw new Error('Ox Alpha returned a streaming response without a readable body.');
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let text = '';
+  let reasoning = '';
+  let reasoningDetails = [];
+  let toolCalls = [];
+  let usage = null;
+  let finishReason = null;
+  let completed = false;
+  const publish = (done = false) => {
+    const generatedTokens = Number(usage?.completion_tokens ?? usage?.output_tokens);
+    const exactTokens = Number.isFinite(generatedTokens) ? generatedTokens : 0;
+    onEvent?.({
+      type: 'generation.progress',
+      provider: 'openrouter',
+      model: OPENROUTER_MODEL,
+      status: done ? 'Ox Alpha finished generating.' : 'Ox Alpha is streaming a response…',
+      generatedTokens: exactTokens,
+      tokenLimit: OPENROUTER_MAX_TOKENS,
+      percent: Math.min(100, Math.round(exactTokens / OPENROUTER_MAX_TOKENS * 100)),
+      elapsedMs: Math.max(0, Date.now() - startedAt),
+      tokensPerSecond: 0,
+      done
+    });
+  };
+  const consumeLine = (line) => {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith(':') || !trimmed.startsWith('data:')) return;
+    const raw = trimmed.slice(5).trim();
+    if (raw === '[DONE]') { completed = true; return; }
+    let event;
+    try { event = JSON.parse(raw); } catch { throw new Error('Ox Alpha returned a malformed streaming event.'); }
+    if (event?.error) throw new Error(`OpenRouter stream failed: ${compactOpenRouterDetail(event.error)}`);
+    const choice = event?.choices?.[0] || {};
+    const delta = choice.delta || {};
+    if (typeof delta.content === 'string') text += delta.content;
+    else if (Array.isArray(delta.content)) text += delta.content.map((part) => typeof part === 'string' ? part : part?.text || '').join('');
+    reasoning += String(delta.reasoning || delta.reasoning_content || '');
+    if (Array.isArray(delta.reasoning_details)) reasoningDetails.push(...delta.reasoning_details);
+    toolCalls = mergeOpenRouterToolCalls(toolCalls, delta.tool_calls);
+    if (choice.finish_reason) { finishReason = choice.finish_reason; completed = true; }
+    if (event.usage) usage = event.usage;
+    publish(false);
+  };
+  publish(false);
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() || '';
+      for (const line of lines) consumeLine(line);
+    }
+    buffer += decoder.decode();
+    if (buffer.trim()) consumeLine(buffer);
+  } catch (error) {
+    if (signal?.aborted || error?.name === 'AbortError' || /^Ox Alpha returned|^OpenRouter stream failed/.test(error?.message || '')) throw error;
+    throw new Error(`Ox Alpha's stream was interrupted: ${error?.cause?.message || error.message}. Use Run again for this agent.`);
+  }
+  if (!completed) throw new Error("Ox Alpha's stream ended before OpenRouter sent a completion marker. Use Run again for this agent.");
+  publish(true);
+  return { text: text.trim(), reasoning: reasoning.trim(), reasoningDetails, toolCalls, usage, finishReason, raw: { streamed: true } };
+}
+
+function compactOpenRouterDetail(value) {
+  if (value == null) return '';
+  if (typeof value === 'object') {
+    const nested = value?.error?.message || value?.message || value?.detail || value?.error;
+    if (nested && nested !== value) return compactOpenRouterDetail(nested);
+    try { return JSON.stringify(value).slice(0, 800); } catch { return ''; }
+  }
+  const text = String(value).replace(/\s+/g, ' ').trim();
+  if (!text) return '';
+  try {
+    const parsed = JSON.parse(text);
+    const nested = compactOpenRouterDetail(parsed);
+    if (nested) return nested;
+  } catch {}
+  return text.slice(0, 800);
+}
+
+function parseOpenRouterError(raw) {
+  let data = null;
+  try { data = JSON.parse(String(raw || '')); } catch {}
+  const error = data?.error && typeof data.error === 'object' ? data.error : {};
+  const metadata = error.metadata && typeof error.metadata === 'object' ? error.metadata : {};
+  const routerMetadata = data?.openrouter_metadata && typeof data.openrouter_metadata === 'object' ? data.openrouter_metadata : {};
+  const provider = compactOpenRouterDetail(
+    metadata.provider_name || metadata.provider || routerMetadata.provider_name || routerMetadata.provider?.name
+  );
+  const primary = compactOpenRouterDetail(error.message || data?.message || raw);
+  const upstream = compactOpenRouterDetail(metadata.raw || metadata.error || metadata.message || routerMetadata.error);
+  const detail = upstream && upstream.toLowerCase() !== primary.toLowerCase() ? upstream : primary;
+  return { detail: detail || 'No additional details were returned.', provider };
+}
+
+function readResponseHeader(response, name) {
+  try { return response?.headers?.get?.(name) || ''; } catch { return ''; }
+}
+
+function openRouterRetryDelay(response, attempt) {
+  const retryAfter = readResponseHeader(response, 'retry-after');
+  if (retryAfter) {
+    const seconds = Number(retryAfter);
+    if (Number.isFinite(seconds) && seconds >= 0) return Math.min(seconds * 1000, 30000);
+    const date = Date.parse(retryAfter);
+    if (Number.isFinite(date)) return Math.min(Math.max(0, date - Date.now()), 30000);
+  }
+  return [2500, 7000][Math.min(attempt - 1, 1)];
+}
+
+function sleepWithSignal(milliseconds, signal) {
+  if (!signal) return sleep(milliseconds);
+  if (signal.aborted) return Promise.reject(signal.reason || Object.assign(new Error('The operation was aborted.'), { name: 'AbortError' }));
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(done, milliseconds);
+    function done() {
+      signal.removeEventListener('abort', aborted);
+      resolve();
+    }
+    function aborted() {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', aborted);
+      reject(signal.reason || Object.assign(new Error('The operation was aborted.'), { name: 'AbortError' }));
+    }
+    signal.addEventListener('abort', aborted, { once: true });
+  });
+}
+
+function combinedRequestSignal(signal, timeoutMs) {
+  const timeout = AbortSignal.timeout(timeoutMs);
+  return signal && typeof AbortSignal.any === 'function' ? AbortSignal.any([signal, timeout]) : signal || timeout;
+}
+
+function providerRetryDelay(response, attempt, retryDelaysMs) {
+  const retryAfter = readResponseHeader(response, 'retry-after');
+  if (retryAfter) {
+    const seconds = Number(retryAfter);
+    if (Number.isFinite(seconds) && seconds >= 0) return Math.min(seconds * 1000, 30000);
+    const date = Date.parse(retryAfter);
+    if (Number.isFinite(date)) return Math.min(Math.max(0, date - Date.now()), 30000);
+  }
+  return retryDelaysMs[Math.min(attempt - 1, retryDelaysMs.length - 1)] || 0;
+}
+
+async function fetchProviderWithRetry({ url, init, signal, label, onEvent, retryDelaysMs = [2500, 7000], timeoutMs = PROVIDER_REQUEST_TIMEOUT_MS, consumeBody = true, maxAttempts = PROVIDER_MAX_ATTEMPTS, retryableStatuses = PROVIDER_RETRYABLE_STATUSES }) {
+  const safeMaxAttempts = Math.max(1, Math.min(PROVIDER_MAX_ATTEMPTS, Number(maxAttempts) || 1));
+  for (let attempt = 1; attempt <= safeMaxAttempts; attempt += 1) {
+    let response;
+    let raw;
+    try {
+      response = await fetch(url, { ...init, signal: combinedRequestSignal(signal, timeoutMs) });
+      raw = consumeBody ? await response.text() : '';
+    } catch (error) {
+      if (signal?.aborted || error?.name === 'AbortError') throw error;
+      const timedOut = error?.name === 'TimeoutError' || /timeout|aborted due to timeout/i.test(error?.message || '');
+      if (attempt < safeMaxAttempts) {
+        const delay = providerRetryDelay(null, attempt, retryDelaysMs);
+        onEvent?.({ type: 'provider.info', text: `${label} ${timedOut ? 'timed out' : 'lost its network connection'}; retrying in ${Math.max(0, Math.round(delay / 1000))} seconds (${attempt + 1}/${safeMaxAttempts}).` });
+        await sleepWithSignal(delay, signal);
+        continue;
+      }
+      const detail = error?.cause?.code || error?.cause?.message || error?.message || 'network request failed';
+      throw new Error(`${label} ${timedOut ? 'timed out' : 'connection failed'} after ${attempt} attempts: ${detail}. Your saved API key was not rejected.`);
+    }
+    const shouldRetry = retryableStatuses.has(response.status) && readResponseHeader(response, 'x-should-retry').toLowerCase() !== 'false';
+    if (shouldRetry && attempt < safeMaxAttempts) {
+      const delay = providerRetryDelay(response, attempt, retryDelaysMs);
+        onEvent?.({ type: 'provider.info', text: `${label} returned HTTP ${response.status}; retrying in ${Math.max(0, Math.round(delay / 1000))} seconds (${attempt + 1}/${safeMaxAttempts}).` });
+      await sleepWithSignal(delay, signal);
+      continue;
+    }
+    return { response, raw, attempts: attempt };
+  }
+  throw new Error(`${label} request ended without a response.`);
+}
+function extractGeminiText(data) {
+  return (data?.candidates || [])
+    .flatMap((candidate) => candidate?.content?.parts || [])
+    .filter((part) => !part?.thought)
+    .map((part) => part?.text || '')
     .join('')
     .trim();
 }
@@ -74,12 +404,55 @@ function parseLooseJson(text) {
   if (!trimmed) return null;
   const unfenced = trimmed.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '');
   try { return JSON.parse(unfenced); } catch {}
-  const first = unfenced.indexOf('{');
-  const last = unfenced.lastIndexOf('}');
-  if (first >= 0 && last > first) {
-    try { return JSON.parse(unfenced.slice(first, last + 1)); } catch {}
+  const candidates = [];
+  const score = (value) => {
+    if (Array.isArray(value)) return 30;
+    if (!value || typeof value !== 'object') return 0;
+    let result = 40;
+    if ('files' in value) result += 40;
+    if ('summary' in value) result += 40;
+    if ('notes' in value) result += 20;
+    if (value.result && typeof value.result === 'object') result += 25;
+    if (value.output && typeof value.output === 'object') result += 25;
+    return result;
+  };
+  const starts = [];
+  for (let index = 0; index < unfenced.length; index += 1) {
+    if (unfenced[index] === '{' || unfenced[index] === '[') starts.push(index);
   }
-  return null;
+  // Provider output can include source code with thousands of braces. Prefer
+  // the final response region and cap recovery work so malformed output cannot
+  // make parsing quadratic without bound.
+  for (const start of starts.slice(-512)) {
+    const stack = [];
+    let inString = false;
+    let escaped = false;
+    for (let index = start; index < unfenced.length; index += 1) {
+      const character = unfenced[index];
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (character === '\\') escaped = true;
+        else if (character === '"') inString = false;
+        continue;
+      }
+      if (character === '"') { inString = true; continue; }
+      if (character === '{' || character === '[') stack.push(character);
+      else if (character === '}' || character === ']') {
+        const expected = character === '}' ? '{' : '[';
+        if (stack.at(-1) !== expected) break;
+        stack.pop();
+        if (!stack.length) {
+          try {
+            const value = JSON.parse(unfenced.slice(start, index + 1));
+            candidates.push({ value, score: score(value), start });
+          } catch {}
+          break;
+        }
+      }
+    }
+  }
+  candidates.sort((left, right) => right.score - left.score || right.start - left.start);
+  return candidates[0]?.value ?? null;
 }
 
 function sleep(milliseconds) {
@@ -136,6 +509,7 @@ class ProviderManager {
     this.downloadsDir = path.join(this.toolsDir, 'downloads');
     this.ollamaProcess = null;
     this.codexCompatibility = null;
+    this.retryDelaysMs = [2500, 7000];
     fs.mkdirSync(this.downloadsDir, { recursive: true });
   }
 
@@ -164,7 +538,7 @@ class ProviderManager {
 
   connectedProviderIds() {
     const providers = this.store.getState().providers;
-    return ['codex', 'gemini', 'ollama', 'agentrouter', 'openrouter'].filter((id) => Boolean(providers[id]?.connected));
+    return ['codex', 'gemini', 'ollama', 'openrouter', 'tokenin'].filter((id) => Boolean(providers[id]?.connected));
   }
 
   managedCodexPath() {
@@ -368,7 +742,7 @@ class ProviderManager {
     return this.store.getState().providers.gemini;
   }
 
-  async runGemini({ prompt, model, signal, responseMode = 'json', systemPrompt = '', responseSchema = null }) {
+  async runGemini({ prompt, model, signal, responseMode = 'json', systemPrompt = '', responseSchema = null, onEvent }) {
     const key = this.getSecret('gemini-api-key');
     if (!key) throw new Error('Gemini API is not connected.');
     const selected = model || this.store.getState().providers.gemini.model || 'gemini-2.5-flash';
@@ -378,110 +752,49 @@ class ProviderManager {
       maxOutputTokens: Math.max(2048, Math.min(Number(modelInfo?.outputTokenLimit) || 16384, 32768))
     };
     if (responseMode === 'json') {
-      generationConfig.responseMimeType = 'application/json';
-      if (responseSchema) generationConfig.responseSchema = responseSchema;
+      generationConfig.responseFormat = {
+        text: {
+          mimeType: 'application/json',
+          ...(responseSchema ? { schema: responseSchema } : {})
+        }
+      };
     }
     const requestBody = {
       contents: [{ role: 'user', parts: [{ text: prompt }] }],
       generationConfig
     };
     if (systemPrompt) requestBody.systemInstruction = { parts: [{ text: String(systemPrompt) }] };
-    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(selected)}:generateContent`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-goog-api-key': key },
+    const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(selected)}:generateContent`;
+    const send = (body) => fetchProviderWithRetry({
+      url: endpoint,
+      init: { method: 'POST', headers: { 'content-type': 'application/json', 'x-goog-api-key': key }, body: JSON.stringify(body) },
       signal,
-      body: JSON.stringify(requestBody)
+      label: 'Gemini',
+      onEvent,
+      retryDelaysMs: this.retryDelaysMs
     });
-    const raw = await response.text();
-    if (!response.ok) throw new Error(`Gemini request failed (${response.status}): ${raw.slice(0, 800)}`);
-    const data = JSON.parse(raw);
-    const text = (data.candidates || []).flatMap((c) => c.content?.parts || []).map((p) => p.text || '').join('').trim();
-    return { text, json: responseMode === 'json' ? parseLooseJson(text) : null, finishReason: data.candidates?.[0]?.finishReason || null, raw: data };
-  }
-
-  async requestAgentRouter({ apiKey, prompt, signal, responseMode = 'json', maxTokens = 16000, systemPrompt = '' }) {
-    const response = await fetch(AGENTROUTER_ENDPOINT, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        authorization: `Bearer ${apiKey}`,
-        'anthropic-version': '2023-06-01',
-        'user-agent': AGENTROUTER_USER_AGENT
-      },
-      signal: signal || AbortSignal.timeout(60000),
-      body: JSON.stringify(buildAgentRouterRequest(prompt, { maxTokens, systemPrompt }))
-    });
-    const raw = await response.text();
-    if (!response.ok) throw new Error(`AgentRouter request failed (${response.status}): ${raw.slice(0, 800)}`);
+    let { response, raw, attempts } = await send(requestBody);
+    if (!response.ok && responseMode === 'json' && response.status === 400 && /response.?format|unknown field|unrecognized/i.test(raw)) {
+      const legacyConfig = { ...generationConfig };
+      delete legacyConfig.responseFormat;
+      legacyConfig.responseMimeType = 'application/json';
+      if (responseSchema) legacyConfig.responseSchema = responseSchema;
+      onEvent?.({ type: 'provider.info', text: `Gemini ${selected} requires the legacy structured-output format; retrying with compatibility mode.` });
+      ({ response, raw, attempts } = await send({ ...requestBody, generationConfig: legacyConfig }));
+    }
+    if (!response.ok) {
+      if ([500, 502, 503, 504, 529].includes(response.status)) throw new Error(`Gemini is temporarily unavailable (${response.status}) after ${attempts} attempts. Your API key was accepted; wait briefly and use Run again.`);
+      throw new Error(`Gemini request failed (${response.status}): ${raw.slice(0, 800)}`);
+    }
     let data;
-    try { data = JSON.parse(raw); } catch { throw new Error('AgentRouter returned an invalid response.'); }
-    const text = extractAnthropicText(data);
-    if (!text) throw new Error('Claude Opus 4.8 returned an empty response.');
-    return { text, json: responseMode === 'json' ? parseLooseJson(text) : null, raw: data };
-  }
-
-  async connectAgentRouter(apiKey) {
-    const key = String(apiKey || '').trim();
-    if (!key) throw new Error('AgentRouter API key is required.');
-    if (!this.safeStorage.isEncryptionAvailable()) throw new Error('Operating-system encryption is required before an AgentRouter key can be saved.');
-    await this.requestAgentRouter({
-      apiKey: key,
-      prompt: 'Reply with only OK to confirm this API key can invoke Claude Opus 4.8.',
-      responseMode: 'text',
-      maxTokens: 1024
-    });
-    this.setSecret('agentrouter-api-key', key);
-    this.store.mutate((s) => {
-      s.providers.agentrouter = {
-        ...s.providers.agentrouter,
-        connected: true,
-        model: AGENTROUTER_MODEL,
-        models: [{ id: AGENTROUTER_MODEL, name: 'Claude Opus 4.8' }],
-        effort: AGENTROUTER_EFFORT,
-        endpoint: AGENTROUTER_ENDPOINT,
-        lastCheck: new Date().toISOString(),
-        detail: 'Claude Opus 4.8 ready · medium effort'
-      };
-    });
-    return this.store.getState().providers.agentrouter;
-  }
-
-  async disconnectAgentRouter() {
-    this.deleteSecret('agentrouter-api-key');
-    this.store.mutate((s) => {
-      s.providers.agentrouter = {
-        ...s.providers.agentrouter,
-        connected: false,
-        lastCheck: new Date().toISOString(),
-        detail: 'Not connected'
-      };
-    });
-    return this.store.getState().providers.agentrouter;
-  }
-
-  async refreshAgentRouter() {
-    let key = null;
-    let keyError = null;
-    try { key = this.getSecret('agentrouter-api-key'); } catch (error) { keyError = error; }
-    this.store.mutate((s) => {
-      s.providers.agentrouter = {
-        ...s.providers.agentrouter,
-        connected: Boolean(key),
-        model: AGENTROUTER_MODEL,
-        models: [{ id: AGENTROUTER_MODEL, name: 'Claude Opus 4.8' }],
-        effort: AGENTROUTER_EFFORT,
-        endpoint: AGENTROUTER_ENDPOINT,
-        lastCheck: new Date().toISOString(),
-        detail: key ? 'Encrypted API key stored · Claude Opus 4.8 · medium effort' : keyError ? `Stored key could not be decrypted: ${keyError.message}` : 'Not connected'
-      };
-    });
-    return this.store.getState().providers.agentrouter;
-  }
-
-  async runAgentRouter({ prompt, signal, responseMode = 'json', systemPrompt = '' }) {
-    const key = this.getSecret('agentrouter-api-key');
-    if (!key) throw new Error('AgentRouter is not connected. Add its API key on the Providers page.');
-    return this.requestAgentRouter({ apiKey: key, prompt, signal, responseMode, systemPrompt });
+    try { data = JSON.parse(raw); } catch { throw new Error('Gemini returned an invalid API response.'); }
+    const text = extractGeminiText(data);
+    const finishReason = data.candidates?.[0]?.finishReason || null;
+    if (!text) {
+      const blocked = data.promptFeedback?.blockReason ? ` Prompt blocked: ${data.promptFeedback.blockReason}.` : '';
+      throw new Error(`Gemini returned no final answer${finishReason ? ` (finish reason: ${finishReason})` : ''}.${blocked}`.trim());
+    }
+    return { text, json: responseMode === 'json' ? parseLooseJson(text) : null, finishReason, usage: data.usageMetadata || null, raw: data };
   }
 
   async validateOpenRouterKey(apiKey) {
@@ -507,48 +820,110 @@ class ProviderManager {
     }
     let modelData;
     try { modelData = await modelResponse.json(); } catch { throw new Error('OpenRouter returned invalid model information.'); }
-    if (modelData?.data?.id !== OPENROUTER_MODEL) throw new Error('GLM 5.2 Free is not currently available through OpenRouter.');
+    if (modelData?.data?.id !== OPENROUTER_MODEL) throw new Error('Ox Alpha is not currently available through OpenRouter.');
     return true;
   }
 
-  async requestOpenRouter({ apiKey, prompt, signal, responseMode = 'json', maxTokens = OPENROUTER_MAX_TOKENS, systemPrompt = '' }) {
-    let response;
-    try {
-      response = await fetch(OPENROUTER_ENDPOINT, {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          authorization: `Bearer ${apiKey}`,
-          'x-title': 'Noor AI Studio'
-        },
-        signal: signal || AbortSignal.timeout(15 * 60 * 1000),
-        body: JSON.stringify(buildOpenRouterRequest(prompt, { maxTokens, systemPrompt, responseMode }))
+  async requestOpenRouter({
+    apiKey,
+    prompt,
+    signal,
+    responseMode = 'json',
+    responseFormat = null,
+    maxTokens = OPENROUTER_MAX_TOKENS,
+    systemPrompt = '',
+    stream = false,
+    messages = null,
+    attachments = [],
+    tools = null,
+    toolChoice = null,
+    onEvent
+  }) {
+    const body = JSON.stringify(buildOpenRouterRequest(prompt, { maxTokens, systemPrompt, responseMode, responseFormat, stream, messages, attachments, tools, toolChoice }));
+    const startedAt = Date.now();
+    onEvent?.({ type: 'generation.progress', provider: 'openrouter', model: OPENROUTER_MODEL, status: stream ? 'Ox Alpha is preparing a stream…' : 'Ox Alpha is generating…', generatedTokens: 0, tokenLimit: OPENROUTER_MAX_TOKENS, percent: 0, elapsedMs: 0, tokensPerSecond: 0, done: false });
+    for (let attempt = 1; attempt <= OPENROUTER_MAX_ATTEMPTS; attempt += 1) {
+      let response;
+      try {
+        response = await fetch(OPENROUTER_ENDPOINT, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            authorization: `Bearer ${apiKey}`,
+            'x-title': 'Noor AI Studio',
+            'x-openrouter-metadata': 'enabled'
+          },
+          signal: signal || AbortSignal.timeout(15 * 60 * 1000),
+          body
+        });
+      } catch (error) {
+        if (signal?.aborted || error?.name === 'AbortError') throw error;
+        const timedOut = error?.name === 'TimeoutError' || /timeout|aborted due to timeout/i.test(error?.message || '');
+        throw new Error(timedOut ? 'Ox Alpha exceeded 15 minutes. OpenRouter may be rate-limited or at capacity; use Run again for this agent.' : `OpenRouter connection failed: ${error?.cause?.message || error.message}`);
+      }
+      if (!response.ok) {
+        const raw = await response.text();
+        const parsed = parseOpenRouterError(raw);
+        const retryable = OPENROUTER_RETRYABLE_STATUSES.has(response.status);
+        if (retryable && attempt < OPENROUTER_MAX_ATTEMPTS) {
+          const delay = openRouterRetryDelay(response, attempt);
+          const provider = parsed.provider ? ` (${parsed.provider})` : '';
+          onEvent?.({
+            type: 'provider.info',
+            text: `Ox Alpha was temporarily unavailable${provider}; retrying in ${Math.max(0, Math.round(delay / 1000))} seconds (${attempt + 1}/${OPENROUTER_MAX_ATTEMPTS}).`
+          });
+          await sleepWithSignal(delay, signal);
+          continue;
+        }
+        const provider = parsed.provider ? ` Upstream provider: ${parsed.provider}.` : '';
+        if (response.status === 429) {
+          throw new Error(`Ox Alpha is rate-limited by OpenRouter or its upstream provider (429) after ${attempt} attempts. Your API key was accepted; this is a free-model quota or capacity limit.${provider} Details: ${parsed.detail} Wait for the limit to reset, then use Run again.`);
+        }
+        throw new Error(`OpenRouter request failed (${response.status}) after ${attempt} attempt${attempt === 1 ? '' : 's'}:${provider} ${parsed.detail}`);
+      }
+      if (stream) {
+        const streamed = await readOpenRouterStream(response, { signal, onEvent, startedAt });
+        if (!streamed.text && !streamed.reasoning && !streamed.toolCalls.length) throw new Error('Ox Alpha returned an empty streaming response.');
+        return {
+          ...streamed,
+          text: streamed.text || streamed.reasoning,
+          json: responseMode === 'json' ? parseLooseJson(streamed.text) : null
+        };
+      }
+      const raw = await response.text();
+      let data;
+      try { data = JSON.parse(raw); } catch { throw new Error('OpenRouter returned an invalid response.'); }
+      const message = data?.choices?.[0]?.message || {};
+      const text = extractOpenRouterText(message);
+      const reasoning = String(message.reasoning || message.reasoning_content || '').trim();
+      const toolCalls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
+      if (!text && !reasoning && !toolCalls.length) throw new Error('Ox Alpha returned an empty response.');
+      const usage = data?.usage || null;
+      const generatedTokens = Number(usage?.completion_tokens ?? usage?.output_tokens);
+      onEvent?.({
+        type: 'generation.progress',
+        provider: 'openrouter',
+        model: OPENROUTER_MODEL,
+        status: 'Ox Alpha finished generating.',
+        generatedTokens: Number.isFinite(generatedTokens) ? generatedTokens : 0,
+        tokenLimit: OPENROUTER_MAX_TOKENS,
+        percent: Number.isFinite(generatedTokens) ? Math.min(100, Math.round(generatedTokens / OPENROUTER_MAX_TOKENS * 100)) : 0,
+        elapsedMs: Math.max(0, Date.now() - startedAt),
+        tokensPerSecond: 0,
+        done: true
       });
-    } catch (error) {
-      if (signal?.aborted || error?.name === 'AbortError') throw error;
-      const timedOut = error?.name === 'TimeoutError' || /timeout|aborted due to timeout/i.test(error?.message || '');
-      throw new Error(timedOut ? 'GLM 5.2 Free exceeded 15 minutes. OpenRouter may be rate-limited or at capacity; use Run again for this agent.' : `OpenRouter connection failed: ${error?.cause?.message || error.message}`);
+      return {
+        text: text || reasoning,
+        reasoning,
+        reasoningDetails: Array.isArray(message.reasoning_details) ? message.reasoning_details : [],
+        toolCalls,
+        json: responseMode === 'json' ? parseLooseJson(text) : null,
+        finishReason: data?.choices?.[0]?.finish_reason || null,
+        usage,
+        raw: data
+      };
     }
-    const raw = await response.text();
-    if (!response.ok) {
-      let detail = raw.slice(0, 800);
-      try { detail = JSON.parse(raw)?.error?.message || detail; } catch {}
-      throw new Error(`OpenRouter request failed (${response.status}): ${detail}`);
-    }
-    let data;
-    try { data = JSON.parse(raw); } catch { throw new Error('OpenRouter returned an invalid response.'); }
-    const message = data?.choices?.[0]?.message || {};
-    const text = extractOpenRouterText(message);
-    const reasoning = String(message.reasoning || message.reasoning_content || '').trim();
-    if (!text && !reasoning) throw new Error('GLM 5.2 Free returned an empty response.');
-    return {
-      text: text || reasoning,
-      reasoning,
-      json: responseMode === 'json' ? parseLooseJson(text) : null,
-      finishReason: data?.choices?.[0]?.finish_reason || null,
-      usage: data?.usage || null,
-      raw: data
-    };
+    throw new Error('OpenRouter request ended without a response.');
   }
 
   async connectOpenRouter(apiKey) {
@@ -562,11 +937,11 @@ class ProviderManager {
         ...s.providers.openrouter,
         connected: true,
         model: OPENROUTER_MODEL,
-        models: [{ id: OPENROUTER_MODEL, name: 'GLM 5.2 Free' }],
+        models: [cloneOxAlphaModel()],
         effort: OPENROUTER_EFFORT,
         endpoint: OPENROUTER_ENDPOINT,
         lastCheck: new Date().toISOString(),
-        detail: 'OpenRouter key verified · GLM 5.2 Free · high effort'
+        detail: 'OpenRouter key verified · Ox Alpha · high effort'
       };
       if (!Array.isArray(s.settings.defaultParticipants)) s.settings.defaultParticipants = [];
       if (!s.settings.defaultParticipants.includes('openrouter')) s.settings.defaultParticipants.push('openrouter');
@@ -591,27 +966,206 @@ class ProviderManager {
         ...s.providers.openrouter,
         connected: Boolean(key),
         model: OPENROUTER_MODEL,
-        models: [{ id: OPENROUTER_MODEL, name: 'GLM 5.2 Free' }],
+        models: [cloneOxAlphaModel()],
         effort: OPENROUTER_EFFORT,
         endpoint: OPENROUTER_ENDPOINT,
         lastCheck: new Date().toISOString(),
-        detail: key ? 'Encrypted OpenRouter key stored · GLM 5.2 Free · high effort' : keyError ? `Stored key could not be decrypted: ${keyError.message}` : 'Not connected'
+        detail: key ? 'Encrypted OpenRouter key stored · Ox Alpha · high effort' : keyError ? `Stored key could not be decrypted: ${keyError.message}` : 'Not connected'
       };
     });
     return this.store.getState().providers.openrouter;
   }
 
-  async runOpenRouter({ prompt, signal, responseMode = 'json', systemPrompt = '' }) {
+  async runOpenRouter({ prompt, signal, responseMode = 'json', responseFormat = null, systemPrompt = '', stream = false, messages = null, attachments = [], tools = null, toolChoice = null, onEvent }) {
     const key = this.getSecret('openrouter-api-key');
     if (!key) throw new Error('OpenRouter is not connected. Add its API key on the Providers page.');
     try {
-      return await this.requestOpenRouter({ apiKey: key, prompt, signal, responseMode, systemPrompt });
+      return await this.requestOpenRouter({ apiKey: key, prompt, signal, responseMode, responseFormat, systemPrompt, stream, messages, attachments, tools, toolChoice, onEvent });
     } catch (error) {
       if (/request failed \(401\)/i.test(error.message)) {
         this.store.mutate((s) => {
           s.providers.openrouter.connected = false;
           s.providers.openrouter.lastCheck = new Date().toISOString();
           s.providers.openrouter.detail = 'OpenRouter rejected the stored API key. Reconnect with a current key.';
+        });
+      }
+      throw error;
+    }
+  }
+
+  async validateTokenInKey(apiKey) {
+    let response;
+    try {
+      response = await fetch(TOKENIN_MODELS_ENDPOINT, {
+        headers: { authorization: `Bearer ${apiKey}` },
+        signal: AbortSignal.timeout(30000)
+      });
+    } catch (error) {
+      const timedOut = error?.name === 'TimeoutError' || /timeout|aborted due to timeout/i.test(error?.message || '');
+      throw new Error(timedOut ? 'TokenIn did not respond within 30 seconds. Check your network and try again.' : `TokenIn could not be reached: ${error?.cause?.message || error.message}`);
+    }
+    const raw = await response.text();
+    if (!response.ok) throw new Error(`TokenIn rejected the API key (${response.status}): ${tokenInErrorDetail(raw) || 'No details returned.'}`);
+    let data;
+    try { data = JSON.parse(raw); } catch { throw new Error('TokenIn returned invalid model information.'); }
+    const entries = Array.isArray(data) ? data : Array.isArray(data?.data) ? data.data : Array.isArray(data?.models) ? data.models : [];
+    const ids = new Set(entries.map((item) => typeof item === 'string' ? item : item?.id || item?.model).filter(Boolean));
+    const models = cloneTokenInModels().filter((item) => ids.has(item.id));
+    if (!models.length) throw new Error('The TokenIn key is valid, but neither requested free model is currently enabled for it. Check the TokenIn Models dashboard.');
+    return models;
+  }
+
+  async requestTokenIn({ apiKey, prompt, model, signal, responseMode = 'json', systemPrompt = '', stream = true, messages = null, onEvent }) {
+    const selected = tokenInModel(model || this.store.getState().providers.tokenin.model);
+    if (!selected) throw new Error('Choose one of the supported TokenIn models on the Providers page.');
+    const body = JSON.stringify(buildTokenInRequest(prompt, { model: selected.id, systemPrompt, responseMode, stream, messages }));
+    const startedAt = Date.now();
+    onEvent?.({
+      type: 'generation.progress', provider: 'tokenin', model: selected.id,
+      status: `${selected.name} is waiting for TokenIn…`, generatedTokens: 0,
+      tokenLimit: TOKENIN_MAX_TOKENS, percent: 0, elapsedMs: 0, tokensPerSecond: 0,
+      liveTokenCounts: Boolean(stream), done: false
+    });
+    for (let attempt = 1; attempt <= TOKENIN_MAX_ATTEMPTS; attempt += 1) {
+      let response;
+      try {
+        response = await fetch(TOKENIN_ENDPOINT, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', authorization: `Bearer ${apiKey}` },
+          signal: combinedRequestSignal(signal, PROVIDER_REQUEST_TIMEOUT_MS),
+          body
+        });
+      } catch (error) {
+        if (signal?.aborted || error?.name === 'AbortError') throw error;
+        const timedOut = error?.name === 'TimeoutError' || /timeout|aborted due to timeout/i.test(error?.message || '');
+        throw new Error(timedOut ? `${selected.name} exceeded 10 minutes through TokenIn. Use Run again for this agent.` : `TokenIn connection failed: ${error?.cause?.message || error.message}`);
+      }
+      if (!response.ok) {
+        const raw = await response.text();
+        const detail = tokenInErrorDetail(raw) || 'No additional details were returned.';
+        if (TOKENIN_RETRYABLE_STATUSES.has(response.status) && attempt < TOKENIN_MAX_ATTEMPTS) {
+          const delay = providerRetryDelay(response, attempt, this.retryDelaysMs);
+          onEvent?.({ type: 'provider.info', text: `${selected.name} was temporarily unavailable through TokenIn; retrying in ${Math.max(0, Math.round(delay / 1000))} seconds (${attempt + 1}/${TOKENIN_MAX_ATTEMPTS}).` });
+          await sleepWithSignal(delay, signal);
+          continue;
+        }
+        if (response.status === 401) throw new Error(`TokenIn rejected the stored API key (401): ${detail}`);
+        if (response.status === 402) throw new Error(`TokenIn quota or balance is insufficient (402): ${detail}`);
+        if (response.status === 404) throw new Error(`${selected.name} is not currently allowed for this TokenIn key (404). Refresh Providers and choose an available model.`);
+        if (response.status === 429) throw new Error(`${selected.name} reached TokenIn's free-model rate limit (429) after ${attempt} attempts. Wait for the RPM window to reset, then use Run again. Details: ${detail}`);
+        throw new Error(`TokenIn request failed (${response.status}) after ${attempt} attempt${attempt === 1 ? '' : 's'}: ${detail}`);
+      }
+      if (stream) {
+        const streamed = await readTokenInStream(response, { model: selected.id, signal, onEvent, startedAt });
+        const output = streamed.text || streamed.reasoning;
+        if (!output) throw new Error(`${selected.name} returned an empty streaming response.`);
+        const json = responseMode === 'json'
+          ? parseLooseJson(streamed.text) || parseLooseJson(streamed.reasoning) || parseLooseJson(`${streamed.reasoning}\n${streamed.text}`)
+          : null;
+        return { ...streamed, text: output, json };
+      }
+      const raw = await response.text();
+      let data;
+      try { data = JSON.parse(raw); } catch { throw new Error('TokenIn returned an invalid API response.'); }
+      const message = data?.choices?.[0]?.message || {};
+      const text = extractOpenRouterText(message);
+      const reasoning = String(message.reasoning || message.reasoning_content || '').trim();
+      const output = text || reasoning;
+      if (!output) throw new Error(`${selected.name} returned an empty response.`);
+      const usage = data?.usage || null;
+      const generatedTokens = Number(usage?.completion_tokens ?? usage?.output_tokens);
+      onEvent?.({
+        type: 'generation.progress', provider: 'tokenin', model: selected.id,
+        status: `${selected.name} finished generating.`,
+        generatedTokens: Number.isFinite(generatedTokens) ? generatedTokens : Math.ceil(output.length / 4),
+        tokenLimit: TOKENIN_MAX_TOKENS,
+        percent: Number.isFinite(generatedTokens) ? Math.min(100, Math.round(generatedTokens / TOKENIN_MAX_TOKENS * 100)) : 0,
+        elapsedMs: Math.max(0, Date.now() - startedAt), tokensPerSecond: 0,
+        liveTokenCounts: false, done: true
+      });
+      return {
+        text: output,
+        reasoning,
+        json: responseMode === 'json' ? parseLooseJson(text) || parseLooseJson(reasoning) || parseLooseJson(`${reasoning}\n${text}`) : null,
+        finishReason: data?.choices?.[0]?.finish_reason || null,
+        usage,
+        raw: data
+      };
+    }
+    throw new Error('TokenIn request ended without a response.');
+  }
+
+  async connectTokenIn(apiKey) {
+    const key = String(apiKey || '').trim();
+    if (!key) throw new Error('TokenIn API key is required.');
+    if (!this.safeStorage.isEncryptionAvailable()) throw new Error('Operating-system encryption is required before a TokenIn key can be saved.');
+    const models = await this.validateTokenInKey(key);
+    this.setSecret('tokenin-api-key', key);
+    this.store.mutate((s) => {
+      const current = s.providers.tokenin?.model;
+      s.providers.tokenin = {
+        ...s.providers.tokenin,
+        connected: true,
+        model: models.some((item) => item.id === current) ? current : models[0].id,
+        models,
+        endpoint: TOKENIN_ENDPOINT,
+        lastCheck: new Date().toISOString(),
+        detail: `${models.length} of ${TOKENIN_MODELS.length} requested free models available · key encrypted`
+      };
+      if (!Array.isArray(s.settings.defaultParticipants)) s.settings.defaultParticipants = [];
+      if (!s.settings.defaultParticipants.includes('tokenin')) s.settings.defaultParticipants.push('tokenin');
+    });
+    return this.store.getState().providers.tokenin;
+  }
+
+  async disconnectTokenIn() {
+    this.deleteSecret('tokenin-api-key');
+    this.store.mutate((s) => {
+      s.providers.tokenin = { ...s.providers.tokenin, connected: false, models: cloneTokenInModels(), lastCheck: new Date().toISOString(), detail: 'Not connected' };
+    });
+    return this.store.getState().providers.tokenin;
+  }
+
+  async refreshTokenIn() {
+    let key = null;
+    try { key = this.getSecret('tokenin-api-key'); } catch {}
+    if (!key) {
+      this.store.mutate((s) => {
+        s.providers.tokenin = { ...s.providers.tokenin, connected: false, models: cloneTokenInModels(), lastCheck: new Date().toISOString(), detail: 'Not connected' };
+      });
+      return this.store.getState().providers.tokenin;
+    }
+    try {
+      const models = await this.validateTokenInKey(key);
+      this.store.mutate((s) => {
+        s.providers.tokenin.connected = true;
+        s.providers.tokenin.models = models;
+        if (!models.some((item) => item.id === s.providers.tokenin.model)) s.providers.tokenin.model = models[0].id;
+        s.providers.tokenin.endpoint = TOKENIN_ENDPOINT;
+        s.providers.tokenin.lastCheck = new Date().toISOString();
+        s.providers.tokenin.detail = `${models.length} of ${TOKENIN_MODELS.length} requested free models available · key encrypted`;
+      });
+    } catch (error) {
+      this.store.mutate((s) => {
+        s.providers.tokenin.connected = false;
+        s.providers.tokenin.lastCheck = new Date().toISOString();
+        s.providers.tokenin.detail = error.message;
+      });
+    }
+    return this.store.getState().providers.tokenin;
+  }
+
+  async runTokenIn({ prompt, model, signal, responseMode = 'json', systemPrompt = '', stream = true, messages = null, onEvent }) {
+    const key = this.getSecret('tokenin-api-key');
+    if (!key) throw new Error('TokenIn is not connected. Add its API key on the Providers page.');
+    try {
+      return await this.requestTokenIn({ apiKey: key, prompt, model, signal, responseMode, systemPrompt, stream, messages, onEvent });
+    } catch (error) {
+      if (/rejected the stored API key \(401\)/i.test(error.message)) {
+        this.store.mutate((s) => {
+          s.providers.tokenin.connected = false;
+          s.providers.tokenin.lastCheck = new Date().toISOString();
+          s.providers.tokenin.detail = 'TokenIn rejected the stored API key. Reconnect with a current key.';
         });
       }
       throw error;
@@ -824,6 +1378,7 @@ class ProviderManager {
       String(systemPrompt || '').trim(),
       responseMode === 'json' ? OLLAMA_STRUCTURED_OUTPUT_BUDGET_PROMPT : ''
     ].filter(Boolean).join('\n\n');
+    const outputTokenLimit = responseMode === 'text' ? OLLAMA_TEXT_OUTPUT_TOKEN_LIMIT : OLLAMA_OUTPUT_TOKEN_LIMIT;
     const body = {
       model: selected,
       stream: true,
@@ -831,8 +1386,8 @@ class ProviderManager {
       messages: [...(effectiveSystemPrompt ? [{ role: 'system', content: effectiveSystemPrompt }] : []), { role: 'user', content: prompt }],
       options: {
         temperature: responseMode === 'json' ? 0.2 : 0.45,
-        num_ctx: 24576,
-        num_predict: OLLAMA_OUTPUT_TOKEN_LIMIT
+        num_ctx: responseMode === 'text' ? OLLAMA_TEXT_CONTEXT_WINDOW : 24576,
+        num_predict: outputTokenLimit
       }
     };
     if (responseMode === 'json') body.format = 'json';
@@ -870,10 +1425,10 @@ class ProviderManager {
         type: 'generation.progress',
         provider: 'ollama',
         model: selected,
-        status: done ? `${selected} finished generating.` : generatedTokens ? `${selected} generated ${generatedTokens.toLocaleString()} of ${OLLAMA_OUTPUT_TOKEN_LIMIT.toLocaleString()} output tokens.` : `${selected} is preparing to generate…`,
+        status: done ? `${selected} finished generating.` : generatedTokens ? `${selected} generated ${generatedTokens.toLocaleString()} of ${outputTokenLimit.toLocaleString()} output tokens.` : `${selected} is preparing to generate…`,
         generatedTokens,
-        tokenLimit: OLLAMA_OUTPUT_TOKEN_LIMIT,
-        percent: Math.min(100, Math.round(generatedTokens / OLLAMA_OUTPUT_TOKEN_LIMIT * 100)),
+        tokenLimit: outputTokenLimit,
+        percent: Math.min(100, Math.round(generatedTokens / outputTokenLimit * 100)),
         elapsedMs,
         tokensPerSecond: elapsedMs > 0 ? Number((generatedTokens / (elapsedMs / 1000)).toFixed(2)) : 0,
         done,
@@ -928,7 +1483,7 @@ class ProviderManager {
       usage: {
         generatedTokens,
         promptTokens: Number.isFinite(Number(lastEvent?.prompt_eval_count)) ? Number(lastEvent.prompt_eval_count) : null,
-        tokenLimit: OLLAMA_OUTPUT_TOKEN_LIMIT,
+        tokenLimit: outputTokenLimit,
         elapsedMs: Math.max(0, Date.now() - startedAt),
         tokensPerSecond: Number(lastEvent?.eval_duration) > 0 && Number(lastEvent?.eval_count) >= 0
           ? Number((Number(lastEvent.eval_count) / (Number(lastEvent.eval_duration) / 1e9)).toFixed(2))
@@ -942,8 +1497,8 @@ class ProviderManager {
     if (provider === 'codex') return this.runCodex(options);
     if (provider === 'gemini') return this.runGemini(options);
     if (provider === 'ollama') return this.runOllama(options);
-    if (provider === 'agentrouter') return this.runAgentRouter(options);
     if (provider === 'openrouter') return this.runOpenRouter(options);
+    if (provider === 'tokenin') return this.runTokenIn(options);
     throw new Error(`Unsupported provider: ${provider}`);
   }
 
@@ -958,22 +1513,34 @@ module.exports = {
   ProviderManager,
   parseLooseJson,
   buildCodexExecArgs,
-  buildAgentRouterRequest,
-  extractAnthropicText,
+  extractGeminiText,
   buildOpenRouterRequest,
   extractOpenRouterText,
-  AGENTROUTER_ENDPOINT,
-  AGENTROUTER_MODEL,
-  AGENTROUTER_EFFORT,
-  AGENTROUTER_USER_AGENT,
+  readOpenRouterStream,
+  parseOpenRouterError,
+  buildTokenInRequest,
+  readTokenInStream,
+  tokenInErrorDetail,
+  fetchProviderWithRetry,
   OPENROUTER_ENDPOINT,
   OPENROUTER_KEY_ENDPOINT,
   OPENROUTER_MODEL_ENDPOINT,
   OPENROUTER_MODEL,
   OPENROUTER_EFFORT,
   OPENROUTER_MAX_TOKENS,
+  OPENROUTER_CONTEXT_TOKENS,
+  OPENROUTER_MAX_ATTEMPTS,
+  TOKENIN_ENDPOINT,
+  TOKENIN_MODELS_ENDPOINT,
+  TOKENIN_MAX_TOKENS,
+  TOKENIN_MAX_ATTEMPTS,
+  TOKENIN_STRUCTURED_OUTPUT_BUDGET_PROMPT,
+  PROVIDER_MAX_ATTEMPTS,
+  PROVIDER_REQUEST_TIMEOUT_MS,
   OLLAMA_ENDPOINT,
   OLLAMA_OUTPUT_TOKEN_LIMIT,
+  OLLAMA_TEXT_OUTPUT_TOKEN_LIMIT,
+  OLLAMA_TEXT_CONTEXT_WINDOW,
   OLLAMA_STRUCTURED_OUTPUT_BUDGET_PROMPT,
   OLLAMA_WINDOWS_INSTALLER,
   ollamaCandidatePaths,

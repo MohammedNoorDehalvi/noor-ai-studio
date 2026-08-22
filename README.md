@@ -3,7 +3,7 @@
 > **v0.2.4 runtime note:** Startup and local packaging are npm-free. The launcher downloads and SHA-256-verifies the official Electron Windows runtime directly, then builds a portable app without `node_modules` or `electron-builder`.
 
 
-A local desktop AI development workspace where OpenAI Codex, Gemini, Ollama, Claude Opus 4.8, and GLM 5.2 Free can participate in one project-scoped conversation and in the same specialist-agent workflow.
+A local desktop AI development workspace where OpenAI Codex, Gemini, Ollama, Ox Alpha, and TokenIn models can participate in one project-scoped conversation and in the same specialist-agent workflow.
 
 ## What changed
 
@@ -75,9 +75,17 @@ The app validates a Google AI Studio key, encrypts it with Electron `safeStorage
 
 The app installs or detects the native Windows application, starts the localhost service, lists models, pulls models with progress, and sends local chat requests. It does not expose Ollama to the LAN or internet.
 
-### OpenRouter GLM 5.2 Free
+### OpenRouter Ox Alpha
 
-The app validates an OpenRouter API key and current availability of `z-ai/glm-5.2:free`, then encrypts the key using Electron `safeStorage`. Requests use OpenRouter's unified reasoning configuration at high effort and a structured JSON response contract for file-editing agents. Credentials are excluded from normal state, logs, diagnostics, and backups.
+The app validates an OpenRouter API key and current availability of `stealth/ox-alpha`, then encrypts the key using Electron `safeStorage`. Ox Alpha is free and supports a 1,048,576-token context window, up to 131,072 output tokens, text/image/video input, text output, streaming, tool and function calling, and JSON-object output through `response_format`. Strict JSON Schema enforcement is not claimed. Credentials are excluded from normal state, logs, diagnostics, and backups.
+
+Ox Alpha is an anonymous preview model. Its provider retains prompts and completions; Noor shows this notice before connection and in the provider and Shared Room interfaces.
+
+### TokenIn free models
+
+Noor connects to TokenIn's OpenAI-compatible `https://tokenin.my.id/v1/chat/completions` endpoint with one encrypted API key. It exposes `myt/gpt-5.6-sol-free` and `myt/claude-opus-4-8-free` as separate agent choices, validates current availability through `/v1/models`, and lets Shared Room use the selected TokenIn default model. Saved selections using the former TokenIn GLM entry migrate automatically to GPT-5.6 SOL. TokenIn documents a maximum of 4,096 output tokens, so Noor limits each file-editing agent cycle to one compact, complete file and uses streaming progress. If TokenIn omits exact usage, the UI marks its live count as an estimate. The provider dashboard currently advertises a free limit of 2 RPM for both models.
+
+The TokenIn key is encrypted by Electron `safeStorage` in the main process. It is never returned to the renderer or included in normal state, logs, project files, diagnostics, or backups.
 
 ### Antigravity
 
@@ -103,7 +111,7 @@ The index is written atomically. Messages are append-only NDJSON records with pr
 - `.git` and `.noor-ai` writes from structured providers are blocked.
 - Shared Room runs Codex read-only and does not edit files.
 - Arbitrary shell commands are not exposed. Only a small visible validation allowlist is available.
-- Gemini, AgentRouter, and OpenRouter keys are encrypted using Electron `safeStorage` and excluded from diagnostics/backups.
+- Gemini, OpenRouter, and TokenIn keys are encrypted using Electron `safeStorage` and excluded from diagnostics/backups.
 - Codex credentials remain owned by the official Codex runtime.
 
 ## Known limits

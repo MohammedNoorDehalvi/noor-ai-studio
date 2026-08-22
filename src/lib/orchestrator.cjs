@@ -4,7 +4,7 @@ const crypto = require('node:crypto');
 const { buildContext, safeRelativePath, atomicWrite } = require('./fs-utils.cjs');
 const { providerLabel } = require('./shared-context.cjs');
 const { createBackup, compareBackupToProject, restoreBackupExact } = require('./backup.cjs');
-const { OLLAMA_OUTPUT_TOKEN_LIMIT } = require('./providers.cjs');
+const { OLLAMA_OUTPUT_TOKEN_LIMIT, TOKENIN_MAX_TOKENS, TOKENIN_STRUCTURED_OUTPUT_BUDGET_PROMPT } = require('./providers.cjs');
 
 function chooseRoles(goal) {
   const text = goal.toLowerCase();
@@ -44,6 +44,7 @@ function publicPlan(goal) {
 
 function summarizeProviderEvent(event) {
   if (!event || typeof event !== 'object') return null;
+  if (event.type === 'provider.info') return String(event.text || '').trim().slice(0, 240) || null;
   if (event.type === 'thread.started') return 'Codex thread started';
   if (event.type === 'turn.started') return 'Agent turn started';
   if (event.type === 'turn.completed') return 'Agent turn completed';
@@ -66,7 +67,7 @@ function summarizeProviderEvent(event) {
 }
 
 function assignProviders(roles, participants, explicitAssignments = {}, providerState = {}) {
-  const available = [...new Set((participants || []).filter((id) => ['codex', 'gemini', 'ollama', 'agentrouter', 'openrouter'].includes(id) && providerState[id]?.connected))];
+  const available = [...new Set((participants || []).filter((id) => ['codex', 'gemini', 'ollama', 'openrouter', 'tokenin'].includes(id) && providerState[id]?.connected))];
   if (!available.length) throw new Error('Select at least one connected provider.');
   return roles.map((role, index) => {
     const requested = explicitAssignments?.[role.role]?.provider || explicitAssignments?.[role.role] || null;
@@ -74,6 +75,13 @@ function assignProviders(roles, participants, explicitAssignments = {}, provider
     const model = explicitAssignments?.[role.role]?.model || providerState[provider]?.model || null;
     return { ...role, writes: true, provider, model };
   });
+}
+
+function normalizeRoleOrder(roles = []) {
+  return roles
+    .map((role, index) => ({ role, index, order: Number.isInteger(Number(role?.executionOrder)) && Number(role.executionOrder) > 0 ? Number(role.executionOrder) : index + 1 }))
+    .sort((left, right) => left.order - right.order || left.index - right.index)
+    .map(({ role }, index) => ({ ...role, executionOrder: index + 1 }));
 }
 
 function providerEventFiles(event) {
@@ -87,17 +95,65 @@ function providerEventFiles(event) {
 }
 
 const STRUCTURED_AGENT_SYSTEM_PROMPT = [
-  'You are a file-editing software agent running inside Noor AI Studio.',
-  'Your response is consumed by code, not displayed as ordinary chat. Return exactly one valid JSON object and no text before or after it.',
-  'The required object has exactly these top-level fields: summary, files, and notes.',
-  'summary must be a non-empty string describing completed work.',
-  'files must be a JSON array. Every item must be an object with path and content string fields. path is a project-relative path using forward slashes. content is the complete final contents of that file, not a patch, diff, excerpt, placeholder, or markdown code block.',
-  'notes must be an array of strings. Use an empty array when there are no notes. Use an empty files array only when the task genuinely requires no file changes.',
-  'Never return files as an object map. Never use filename, filePath, code, patch, diff, artifact, or nested project fields instead of path and content.',
-  'Never use absolute paths, file URLs, drive letters, parent traversal, .git, or .noor-ai paths.',
-  'Escape quotes, backslashes, tabs, and newlines so the response remains valid JSON. Do not wrap the JSON in markdown fences.',
-  'Before responding, verify that JSON.parse would succeed and every requested file contains its complete implementation.'
+  'NOOR AI STUDIO FILE-OUTPUT PROTOCOL — HIGHEST PRIORITY',
+  'You are a file-editing software agent. Noor applies your work by parsing your final response as JSON. A useful answer in any other format is a failed answer and none of your work will be applied.',
+  '',
+  'ABSOLUTE RESPONSE RULES:',
+  '1. Return exactly one valid JSON object. The first non-whitespace character must be { and the last non-whitespace character must be }.',
+  '2. Return no prose, greeting, explanation, analysis, markdown fence, XML tag, comment, tool call, or other text outside that object.',
+  '3. The object must have exactly three top-level fields named summary, files, and notes. Do not rename, omit, nest, or add top-level fields.',
+  '4. Use strict JSON syntax: double-quoted keys and strings, no trailing commas, no JavaScript expressions, no undefined values, and no comments.',
+  '',
+  'THE ONLY ACCEPTED SHAPE IS:',
+  '{"summary":"Concise description of completed work","files":[{"path":"relative/path.ext","content":"COMPLETE final file contents"}],"notes":["Important note"]}',
+  '',
+  'FIELD CONTRACT:',
+  '- summary: a non-empty JSON string describing work actually completed.',
+  '- files: a JSON array. Each item must contain exactly path and content string fields.',
+  '- path: a project-relative path with forward slashes. Never use an absolute path, drive letter, file URL, parent traversal, .git, or .noor-ai path.',
+  '- content: the complete final contents of the file. Never return a patch, diff, excerpt, ellipsis, placeholder, markdown code block, or instructions for the user to finish.',
+  '- notes: an array of JSON strings. Use [] when there are no notes.',
+  '',
+  'SERIALIZATION RULES:',
+  '- Encode line breaks inside content strings as JSON escapes such as \\n. Escape embedded double quotes and backslashes correctly.',
+  '- Never return files as an object map. Never substitute filename, filePath, code, text, patch, diff, artifact, changes, or nested project objects for path and content.',
+  '- If no file should change, still return a valid object with "files":[] and explain the reason in summary or notes.',
+  '- If the requested work is too large for the output allowance, return fewer complete, coherent files and list remaining work in notes. Never truncate JSON or a file.',
+  '',
+  'MANDATORY SILENT FINAL CHECK:',
+  'Before sending, silently verify all of the following: JSON.parse(response) succeeds; the result is an object, not an array or string; top-level keys are exactly summary/files/notes; every file has string path and content; every file is complete; the response begins with { and ends with }. Then send only the verified JSON object.'
 ].join('\n');
+
+function buildStructuredCorrectionPrompt({ originalPrompt, validationError, finishReason, compact = false }) {
+  return [
+    originalPrompt,
+    'FORMAT RECOVERY — THIS OVERRIDES EVERY CONVERSATIONAL OUTPUT HABIT.',
+    'Your previous response was rejected and no output from it was applied.',
+    `Validation failure: ${validationError || 'the response was not valid Noor file JSON'}.`,
+    finishReason ? `Provider finish reason: ${finishReason}.` : '',
+    compact
+      ? 'Do not redo the whole project in this response. Return at most ONE small, complete, highest-priority file that fits comfortably. Keep the entire response below about 2,800 tokens. If no useful complete file fits, return files:[] and explain the next step briefly in notes.'
+      : 'Redo the assigned work. If the whole scope cannot fit, return a smaller coherent subset. Do not describe the previous mistake.',
+    'For this retry, your first non-whitespace character MUST be { and your last non-whitespace character MUST be }.',
+    'Return exactly: {"summary":"...","files":[{"path":"relative/path.ext","content":"complete final contents"}],"notes":[]}',
+    'Do not use markdown fences. Do not return a plan or explanation outside the JSON. Do not return a top-level array. Do not truncate any file or the closing JSON braces.',
+    'Silently run a JSON.parse check and schema check before sending. Send only the corrected JSON object.'
+  ].filter(Boolean).join('\n\n');
+}
+
+function structuredOutputDiagnostics(result) {
+  const text = String(result?.text || '');
+  const reasoning = String(result?.reasoning || '');
+  const usage = result?.usage || {};
+  return {
+    finishReason: result?.finishReason || null,
+    contentCharacters: text.length,
+    reasoningCharacters: reasoning.length,
+    contentHasObjectDelimiters: text.includes('{') && text.includes('}'),
+    contentHasMarkdownFence: text.includes('```'),
+    reportedOutputTokens: Number(usage.completion_tokens ?? usage.output_tokens) || null
+  };
+}
 
 const STRUCTURED_FILE_RESPONSE_SCHEMA = {
   type: 'object',
@@ -123,21 +179,56 @@ const STRUCTURED_FILE_RESPONSE_SCHEMA = {
 };
 
 function validateStructuredPayload(payload) {
+  if (typeof payload === 'string') {
+    try { payload = JSON.parse(payload); } catch {}
+  }
+  if (Array.isArray(payload)) {
+    payload = {
+      summary: 'Agent returned compatible file edits.',
+      files: payload,
+      notes: ['Noor normalized a top-level file array returned by the provider.']
+    };
+  }
+  if (payload?.result && typeof payload.result === 'object' && !Array.isArray(payload.result)) payload = payload.result;
+  if (payload?.output && typeof payload.output === 'object' && !Array.isArray(payload.output)) payload = payload.output;
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('response is not a JSON object');
   if (typeof payload.summary !== 'string' || !payload.summary.trim()) throw new Error('summary must be a non-empty string');
-  if (!Array.isArray(payload.files)) throw new Error('files must be an array');
-  if (!Array.isArray(payload.notes) || payload.notes.some((note) => typeof note !== 'string')) throw new Error('notes must be an array of strings');
-  if (payload.files.length > 60) throw new Error('files contains more than 60 entries');
+  let files = payload.files;
+  if (files && typeof files === 'object' && !Array.isArray(files)) {
+    files = Object.entries(files).map(([filePath, content]) => ({ path: filePath, content }));
+  }
+  if (!Array.isArray(files)) throw new Error('files must be an array');
+  const notes = payload.notes == null
+    ? []
+    : typeof payload.notes === 'string'
+      ? (payload.notes.trim() ? [payload.notes.trim()] : [])
+      : payload.notes;
+  if (!Array.isArray(notes) || notes.some((note) => typeof note !== 'string')) throw new Error('notes must be an array of strings');
+  if (files.length > 60) throw new Error('files contains more than 60 entries');
+  const normalizedFiles = [];
+  let skippedFileEntries = 0;
   const paths = new Set();
-  for (const [index, file] of payload.files.entries()) {
-    if (!file || typeof file !== 'object' || Array.isArray(file)) throw new Error(`files[${index}] must be an object`);
-    if (typeof file.path !== 'string' || !file.path.trim()) throw new Error(`files[${index}].path must be a non-empty string`);
-    if (typeof file.content !== 'string') throw new Error(`files[${index}].content must be a string`);
+  for (const [index, rawFile] of files.entries()) {
+    if (!rawFile || typeof rawFile !== 'object' || Array.isArray(rawFile)) {
+      skippedFileEntries += 1;
+      continue;
+    }
+    const file = {
+      path: rawFile.path ?? rawFile.filePath ?? rawFile.filename,
+      content: rawFile.content ?? rawFile.code ?? rawFile.text
+    };
+    if (typeof file.path !== 'string' || !file.path.trim() || typeof file.content !== 'string') {
+      skippedFileEntries += 1;
+      continue;
+    }
     const relative = safeRelativePath(file.path);
     if (paths.has(relative)) throw new Error(`files contains duplicate path: ${relative}`);
     paths.add(relative);
+    normalizedFiles.push({ path: relative, content: file.content });
   }
-  return { summary: payload.summary.trim(), files: payload.files, notes: payload.notes };
+  if (files.length && !normalizedFiles.length) throw new Error('files did not contain any usable file objects');
+  if (skippedFileEntries) notes.push(`Noor ignored ${skippedFileEntries} malformed non-file entr${skippedFileEntries === 1 ? 'y' : 'ies'} in the files array.`);
+  return { summary: payload.summary.trim(), files: normalizedFiles, notes };
 }
 
 class Orchestrator {
@@ -299,7 +390,7 @@ class Orchestrator {
       `You are the ${role} specialist inside Noor AI Studio's shared multi-model workspace.`,
       `Purpose: ${purpose}`,
       `User goal: ${goal}`,
-      'The transcript below is canonical shared context. It may include contributions from Noor and any connected provider, including Codex, Gemini, Ollama, Claude, and GLM. Read it before responding. Build on useful ideas, explicitly correct errors or disagreements, and avoid repeating work already completed.',
+      'The transcript below is canonical shared context. It may include contributions from Noor and any connected provider, including Codex, Gemini, Ollama, Ox Alpha, and TokenIn models. Read it before responding. Build on useful ideas, explicitly correct errors or disagreements, and avoid repeating work already completed.',
       `SHARED TRANSCRIPT:\n${sharedTranscript || '(no prior messages)'}`,
       `CURRENT PROJECT FILE CONTEXT:\n${context || '(empty project)'}`,
       'Rules: Work only on this project. Do not use destructive commands, publish, deploy, push Git changes, access secrets, or modify files outside the project.',
@@ -341,29 +432,41 @@ class Orchestrator {
       model: agent.model,
       signal,
       responseMode: 'json',
-      systemPrompt: STRUCTURED_AGENT_SYSTEM_PROMPT,
+      systemPrompt: agent.provider === 'tokenin'
+        ? `${STRUCTURED_AGENT_SYSTEM_PROMPT}\n\n${TOKENIN_STRUCTURED_OUTPUT_BUDGET_PROMPT}`
+        : STRUCTURED_AGENT_SYSTEM_PROMPT,
       responseSchema: STRUCTURED_FILE_RESPONSE_SCHEMA,
       onEvent: onProgress
     });
     const first = await request(prompt);
     try {
+      if (agent.provider === 'tokenin' && !first.json && first.finishReason === 'length') throw new Error(`response reached ${TOKENIN_MAX_TOKENS.toLocaleString()} output tokens before a complete JSON object`);
       return { ...validateStructuredPayload(first.json), usage: first.usage || null };
     } catch (firstError) {
-      const finish = first.finishReason ? ` Gemini finish reason: ${first.finishReason}.` : '';
       this.log(runId, 'warning', `${agent.role} returned malformed file output; asking ${providerLabel(agent.provider)} to correct it once.`, {
-        agentId: agent.id, role: agent.role, provider: agent.provider, validationError: firstError.message
+        agentId: agent.id, role: agent.role, provider: agent.provider, validationError: firstError.message,
+        outputDiagnostics: structuredOutputDiagnostics(first)
       });
-      const correction = [
-        prompt,
-        'CORRECTION REQUIRED: Your previous response could not be applied by Noor AI Studio.',
-        `Validation error: ${firstError.message}.${finish}`,
-        'Redo the requested task and return the complete result using the system JSON contract. Return one JSON object only. Do not explain the correction and do not use markdown.'
-      ].join('\n\n');
+      const correction = buildStructuredCorrectionPrompt({
+        originalPrompt: prompt,
+        validationError: firstError.message,
+        finishReason: first.finishReason,
+        compact: agent.provider === 'tokenin'
+      });
       const second = await request(correction);
       try {
+        if (agent.provider === 'tokenin' && !second.json && second.finishReason === 'length') throw new Error(`response reached ${TOKENIN_MAX_TOKENS.toLocaleString()} output tokens before a complete JSON object`);
         return { ...validateStructuredPayload(second.json), usage: second.usage || null };
       } catch (secondError) {
-        throw new Error(`${agent.role} returned invalid file output twice (${secondError.message}). No output from this agent was applied.`);
+        this.log(runId, 'error', `${agent.role} format recovery failed.`, {
+          agentId: agent.id, role: agent.role, provider: agent.provider,
+          validationError: secondError.message,
+          outputDiagnostics: structuredOutputDiagnostics(second)
+        });
+        const hint = agent.provider === 'tokenin'
+          ? 'TokenIn has a 4,096-token ceiling, so this role should return one compact complete file per run.'
+          : 'The provider did not return Noor file JSON.';
+        throw new Error(`${agent.role} returned invalid file output twice (${secondError.message}). No output from this agent was applied. ${hint}`);
       }
     }
   }
@@ -389,8 +492,9 @@ class Orchestrator {
       for (let round = 1; round <= safeRounds; round++) {
         for (const provider of connected) {
           if (controller.signal.aborted) throw new Error('Shared conversation cancelled by user.');
-          const transcript = this.contexts.buildTranscript(room.id, { maxChars: provider === 'codex' ? 36000 : 60000 });
-          const projectContext = buildContext(project.path, 18000);
+          const transcriptBudget = provider === 'codex' ? 30000 : provider === 'ollama' ? 8000 : 24000;
+          const transcript = this.contexts.buildTranscript(room.id, { maxChars: transcriptBudget, maxMessages: 120 });
+          const projectContext = buildContext(project.path, provider === 'ollama' ? 4000 : 8000);
           const prompt = [
             `You are ${providerLabel(provider)} participating in Noor AI Studio's shared room with other AI backends.`,
             `Project: ${project.name}`,
@@ -447,7 +551,7 @@ class Orchestrator {
     if (pendingReview) throw new Error('Review the previous agent edits before starting another run in this project.');
     const selectedPlan = JSON.parse(JSON.stringify(plan || publicPlan(goal)));
     selectedPlan.parallel = Boolean(selectedPlan.parallel);
-    selectedPlan.roles = (selectedPlan.roles || []).map((role) => ({ ...role, writes: true }));
+    selectedPlan.roles = normalizeRoleOrder(selectedPlan.roles || []).map((role) => ({ ...role, writes: true }));
     const selectedParticipants = participants?.length ? participants : provider ? [provider] : this.providers.connectedProviderIds();
     const assignedRoles = assignProviders(selectedPlan.roles, selectedParticipants, assignments, state.providers);
     const room = contextId ? this.contexts.get(contextId) : this.contexts.getOrCreate(projectId, `${project.name} Engineering Context`);
@@ -478,10 +582,14 @@ class Orchestrator {
       activeAgents: [],
       plan: selectedPlan,
       agents: assignedRoles.map((r) => ({
-        id: crypto.randomUUID(), role: r.role, purpose: r.purpose, writes: r.writes, custom: Boolean(r.custom),
+        id: crypto.randomUUID(), role: r.role, purpose: r.purpose, writes: r.writes, custom: Boolean(r.custom), executionOrder: r.executionOrder,
         provider: r.provider, model: r.model || model || null, status: 'queued', summary: '', files: [], error: null,
         startedAt: null, completedAt: null,
-        progress: r.provider === 'ollama' ? { generatedTokens: 0, tokenLimit: OLLAMA_OUTPUT_TOKEN_LIMIT, percent: 0, elapsedMs: 0, tokensPerSecond: 0, done: false } : null
+        progress: r.provider === 'ollama'
+          ? { generatedTokens: 0, tokenLimit: OLLAMA_OUTPUT_TOKEN_LIMIT, percent: 0, elapsedMs: 0, tokensPerSecond: 0, done: false }
+          : r.provider === 'tokenin'
+            ? { generatedTokens: 0, tokenLimit: TOKENIN_MAX_TOKENS, percent: 0, elapsedMs: 0, tokensPerSecond: 0, done: false, liveTokenCounts: true }
+            : null
       })),
       finalSummary: '',
       error: null,
@@ -508,8 +616,8 @@ class Orchestrator {
       this.log(runId, 'info', `${agent.role} started with ${providerLabel(agent.provider)}`, { agentId: agent.id, role: agent.role, provider: agent.provider });
 
       try {
-        const projectContextLimit = agent.provider === 'codex' ? 16000 : agent.provider === 'ollama' ? 18000 : 52000;
-        const transcriptLimit = agent.provider === 'codex' ? 36000 : agent.provider === 'ollama' ? 24000 : 65000;
+        const projectContextLimit = agent.provider === 'codex' ? 16000 : agent.provider === 'ollama' ? 18000 : agent.provider === 'tokenin' ? 16000 : 52000;
+        const transcriptLimit = agent.provider === 'codex' ? 36000 : agent.provider === 'ollama' ? 24000 : agent.provider === 'tokenin' ? 24000 : 65000;
         const projectContext = buildContext(project.path, projectContextLimit);
         const transcript = this.contexts.buildTranscript(room.id, { maxChars: transcriptLimit });
         let summary = '';
@@ -550,6 +658,8 @@ class Orchestrator {
             prompt,
             signal: controller.signal,
             onProgress: (progress) => {
+              const message = summarizeProviderEvent(progress);
+              if (message) this.log(runId, 'progress', message, { agentId: agent.id, role: agent.role, provider: agent.provider });
               if (progress?.type !== 'generation.progress') return;
               latestProgress = { ...progress };
               this.emit('agent-progress', { runId, agentId: agent.id, ...latestProgress });
@@ -726,6 +836,9 @@ module.exports = {
   publicPlan,
   chooseRoles,
   assignProviders,
+  normalizeRoleOrder,
+  buildStructuredCorrectionPrompt,
+  structuredOutputDiagnostics,
   validateStructuredPayload,
   STRUCTURED_AGENT_SYSTEM_PROMPT,
   STRUCTURED_FILE_RESPONSE_SCHEMA

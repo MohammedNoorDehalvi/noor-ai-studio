@@ -125,7 +125,7 @@ function registerIpc() {
   }));
 
   ipcMain.handle('provider:refresh-all', wrap(async () => {
-    await Promise.allSettled([providers.detectCodex(), providers.refreshGemini(), providers.detectOllama(), providers.refreshAgentRouter(), providers.refreshOpenRouter()]);
+    await Promise.allSettled([providers.detectCodex(), providers.refreshGemini(), providers.detectOllama(), providers.refreshOpenRouter(), providers.refreshTokenIn()]);
     emit('state-changed', store.getState());
     return store.getState().providers;
   }));
@@ -137,18 +137,21 @@ function registerIpc() {
   ipcMain.handle('provider:gemini-connect', wrap((key) => providers.connectGemini(key)));
   ipcMain.handle('provider:gemini-disconnect', wrap(() => providers.disconnectGemini()));
   ipcMain.handle('provider:gemini-refresh', wrap(() => providers.refreshGemini()));
-  ipcMain.handle('provider:agentrouter-connect', wrap((key) => providers.connectAgentRouter(key)));
-  ipcMain.handle('provider:agentrouter-disconnect', wrap(() => providers.disconnectAgentRouter()));
-  ipcMain.handle('provider:agentrouter-refresh', wrap(() => providers.refreshAgentRouter()));
   ipcMain.handle('provider:openrouter-connect', wrap((key) => providers.connectOpenRouter(key)));
   ipcMain.handle('provider:openrouter-disconnect', wrap(() => providers.disconnectOpenRouter()));
   ipcMain.handle('provider:openrouter-refresh', wrap(() => providers.refreshOpenRouter()));
+  ipcMain.handle('provider:tokenin-connect', wrap((key) => providers.connectTokenIn(key)));
+  ipcMain.handle('provider:tokenin-disconnect', wrap(() => providers.disconnectTokenIn()));
+  ipcMain.handle('provider:tokenin-refresh', wrap(() => providers.refreshTokenIn()));
   ipcMain.handle('provider:ollama-detect', wrap(() => providers.detectOllama()));
   ipcMain.handle('provider:ollama-install', wrap(() => providers.installOllama()));
   ipcMain.handle('provider:ollama-start', wrap(() => providers.startOllama()));
   ipcMain.handle('provider:ollama-pull', wrap((model) => providers.pullOllama(model)));
   ipcMain.handle('provider:set-model', wrap(async (provider, model) => store.mutate((s) => {
     if (!s.providers[provider]) throw new Error('Unknown provider.');
+    if (Array.isArray(s.providers[provider].models) && s.providers[provider].models.length && !s.providers[provider].models.some((item) => item.id === model)) {
+      throw new Error('This model is not available for the selected provider.');
+    }
     s.providers[provider].model = model;
   })));
   ipcMain.handle('provider:open-url', wrap(async (kind) => {
@@ -156,8 +159,8 @@ function registerIpc() {
       codex: 'https://developers.openai.com/codex/cli',
       gemini: 'https://aistudio.google.com/app/apikey',
       ollama: 'https://ollama.com/download/windows',
-      agentrouter: 'https://agentrouter.org',
-      openrouter: 'https://openrouter.ai/z-ai/glm-5.2:free'
+      openrouter: 'https://openrouter.ai/stealth/ox-alpha',
+      tokenin: 'https://tokenin.my.id/dashboard/models'
     };
     if (!urls[kind]) throw new Error('Unknown provider link.');
     await shell.openExternal(urls[kind]);
@@ -396,7 +399,7 @@ app.whenReady().then(() => {
   mainWindow.webContents.on('render-process-gone', (_event, details) => {
     appendCrashLog(`Renderer process ended: ${details.reason}`, new Error(`Exit code: ${details.exitCode}`));
   });
-  Promise.allSettled([providers.detectCodex(), providers.refreshGemini(), providers.detectOllama(), providers.refreshAgentRouter(), providers.refreshOpenRouter()]).then(() => emit('state-changed', store.getState()));
+  Promise.allSettled([providers.detectCodex(), providers.refreshGemini(), providers.detectOllama(), providers.refreshOpenRouter(), providers.refreshTokenIn()]).then(() => emit('state-changed', store.getState()));
 }).catch((error) => {
   appendCrashLog('Application startup failed', error);
   try { dialog.showErrorBox('Noor AI Studio could not start', `${error?.message || error}

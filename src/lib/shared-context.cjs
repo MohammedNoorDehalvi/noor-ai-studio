@@ -3,6 +3,8 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { atomicWriteFileSync } = require('./atomic-file.cjs');
 
+const ACTIVE_MESSAGE_PROVIDERS = new Set(['codex', 'gemini', 'ollama', 'openrouter', 'tokenin', 'user', 'system']);
+
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }
@@ -15,8 +17,8 @@ function providerLabel(provider) {
   if (provider === 'codex') return 'OpenAI Codex';
   if (provider === 'gemini') return 'Gemini';
   if (provider === 'ollama') return 'Ollama';
-  if (provider === 'agentrouter') return 'Claude Opus 4.8';
-  if (provider === 'openrouter') return 'GLM 5.2 Free';
+  if (provider === 'openrouter') return 'Ox Alpha';
+  if (provider === 'tokenin') return 'TokenIn';
   if (provider === 'user') return 'Noor';
   return provider || 'System';
 }
@@ -112,13 +114,19 @@ class SharedContextManager {
     const lines = fs.readFileSync(file, 'utf8').split(/\r?\n/).filter(Boolean);
     return lines.slice(-Math.max(1, Math.min(Number(limit) || 500, 2000))).map((line) => {
       try { return JSON.parse(line); } catch { return null; }
-    }).filter(Boolean);
+    }).filter((message) => message && ACTIVE_MESSAGE_PROVIDERS.has(message.provider || 'system'));
   }
 
   get(contextId, limit = 500) {
     const meta = this.getMeta(contextId);
     if (!meta) throw new Error('Shared context not found.');
-    return { ...clone(meta), messages: this.readMessages(contextId, limit) };
+    const messages = this.readMessages(contextId, limit);
+    return {
+      ...clone(meta),
+      messageCount: messages.length,
+      lastPreview: messages.at(-1)?.content?.replace(/\s+/g, ' ').slice(0, 180) || '',
+      messages
+    };
   }
 
   clear(contextId) {
