@@ -1,7 +1,16 @@
-# Noor AI Studio v0.2.4
+# Noor AI Studio v0.3.0
 
+## v0.3.0 Project Head command center
 
-## v0.2.4 Codex prompt transport fix
+- Adds persistent Project Head missions with validated lifecycle transitions, dependency-aware task graphs, retry/skip/reassign controls, user messages, pause/resume/stop, and restart recovery.
+- Adds external mission-baseline checkpoints with final Accept or Reject review; rejecting restores the exact pre-mission project state.
+- Adds Supervised, Safe Auto, Autonomous Local, and Read Only approval modes. Read Only specialists cannot write project files.
+- Makes Command Center the default project destination and adds Plan, Terminal, and Council areas while preserving existing Shared Rooms and Agent Runs.
+- Adds typed safe-command policy, read-only project inspection, provider capability routing, evidence-backed final reports, appearance settings, responsive layouts, and reduced-motion support.
+- Migrates schema v1 local state to schema v2 without discarding projects, providers, runs, rooms, credentials, or settings.
+
+## Previous v0.2.4 Codex prompt transport fix
+
 
 - Sends every Codex task prompt through standard input using the official `codex exec -` form.
 - Prevents Windows `.cmd` shell parsing from splitting prompts at spaces and reporting errors such as `unexpected argument 'are'`.

@@ -1,7 +1,7 @@
 {
   "name": "noor-ai-studio",
-  "version": "0.2.4",
-  "description": "Local-first multi-provider AI development workspace with shared context and shared-context orchestration and stdin-safe Codex CLI execution",
+  "version": "0.3.0",
+  "description": "Local-first multi-provider AI development command center with persistent Project Head missions",
   "main": "src/main.cjs",
   "author": "Noor",
   "license": "UNLICENSED",

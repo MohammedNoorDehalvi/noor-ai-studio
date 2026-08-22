@@ -7,6 +7,8 @@ const { spawn } = require('node:child_process');
 const { LocalStore } = require('./lib/store.cjs');
 const { ProviderManager } = require('./lib/providers.cjs');
 const { Orchestrator } = require('./lib/orchestrator.cjs');
+const { ProjectHeadManager, ACTIVE_PHASES } = require('./lib/project-head.cjs');
+const { commandDecision } = require('./lib/command-policy.cjs');
 const { SharedContextManager } = require('./lib/shared-context.cjs');
 const { listFiles, assertInside, atomicWrite } = require('./lib/fs-utils.cjs');
 const { runProcess, executableExists, findPortableNpm } = require('./lib/process-utils.cjs');
@@ -30,6 +32,7 @@ let store = null;
 let providers = null;
 let orchestrator = null;
 let contexts = null;
+let projectHead = null;
 const previewProcesses = new Map();
 
 function emit(channel, payload) {
@@ -93,6 +96,30 @@ async function npmExecutable() {
   return findPortableNpm() || await executableExists(process.platform === 'win32' ? 'npm.cmd' : 'npm') || await executableExists('npm');
 }
 
+async function runProjectCommand(projectId, raw, approvalMode = 'safe-auto') {
+  const project = getProject(projectId);
+  const decision = commandDecision(raw, approvalMode);
+  if (!decision.allowed) throw new Error(decision.reason);
+  if (decision.approvalRequired) throw new Error('This command requires explicit approval in Supervised mode.');
+  let executable = decision.executable;
+  if (executable === 'npm') executable = await npmExecutable();
+  else executable = await executableExists(executable);
+  if (!executable) throw new Error('Required executable was not found.');
+  emit('terminal-output', { projectId, text: `> ${decision.command}\n` });
+  return runProcess(executable, decision.args, {
+    cwd: project.path,
+    onStdout: (text) => emit('terminal-output', { projectId, text }),
+    onStderr: (text) => emit('terminal-output', { projectId, text })
+  });
+}
+
+function createProjectHeadManager() {
+  return new ProjectHeadManager({
+    store, providers, orchestrator, contexts, emit, userData: app.getPath('userData'),
+    validationRunner: (projectId, command) => runProjectCommand(projectId, command, 'safe-auto')
+  });
+}
+
 function registerIpc() {
   ipcMain.handle('app:get-state', wrap(async () => store.getState()));
   ipcMain.handle('app:get-events', wrap(async (limit) => store.readEvents(limit)));
@@ -110,16 +137,18 @@ function registerIpc() {
   ipcMain.handle('app:complete-onboarding', wrap(async () => store.mutate((s) => { s.onboardingComplete = true; })));
   ipcMain.handle('app:update-settings', wrap(async (patch) => store.mutate((s) => { s.settings = { ...s.settings, ...patch }; })));
   ipcMain.handle('app:reset-data', wrap(async () => {
-    if (orchestrator.hasActiveOperations()) throw new Error('Stop active provider work before resetting application data.');
+    if (orchestrator.hasActiveOperations() || projectHead?.hasActiveOperations()) throw new Error('Stop active provider work before resetting application data.');
     for (const child of previewProcesses.values()) { try { child.kill(); } catch {} }
     previewProcesses.clear();
     try { providers.shutdown(); } catch {}
     orchestrator.resetReviewSnapshots();
+    projectHead?.resetCheckpoints();
     contexts.reset();
     const state = store.reset();
     providers = new ProviderManager({ store, safeStorage, userData: app.getPath('userData'), emit });
     contexts = new SharedContextManager(app.getPath('userData'));
     orchestrator = new Orchestrator({ store, providers, contexts, emit, userData: app.getPath('userData') });
+    projectHead = createProjectHeadManager();
     emit('state-changed', state);
     return state;
   }));
@@ -199,6 +228,8 @@ function registerIpc() {
   ipcMain.handle('project:remove', wrap(async (projectId) => {
     const blockingRun = store.getState().runs.find((run) => run.projectId === projectId && (run.status === 'running' || run.review?.status === 'pending'));
     if (blockingRun) throw new Error(blockingRun.status === 'running' ? 'Stop the active agent run before removing this project.' : 'Accept or reject the pending agent edits before removing this project.');
+    const blockingMission = (store.getState().projectHeadSessions || []).find((session) => session.projectId === projectId && (ACTIVE_PHASES.has(session.phase) || session.phase === 'awaiting-edit-review'));
+    if (blockingMission) throw new Error(blockingMission.phase === 'awaiting-edit-review' ? 'Accept or reject the Project Head mission edits before removing this project.' : 'Stop the active Project Head mission before removing this project.');
     store.mutate((s) => { s.projects = s.projects.filter((p) => p.id !== projectId); });
     emit('state-changed', store.getState());
     return true;
@@ -219,6 +250,9 @@ function registerIpc() {
   ipcMain.handle('project:save-file', wrap(async (projectId, relative, content) => {
     if (store.getState().runs.some((run) => run.projectId === projectId && run.review?.status === 'pending')) {
       throw new Error('Accept or reject the pending agent edits before editing project files manually.');
+    }
+    if ((store.getState().projectHeadSessions || []).some((session) => session.projectId === projectId && session.phase === 'awaiting-edit-review')) {
+      throw new Error('Accept or reject the Project Head mission edits before editing project files manually.');
     }
     const project = getProject(projectId);
     const file = assertInside(project.path, path.join(project.path, relative));
@@ -242,6 +276,21 @@ function registerIpc() {
     emit('state-changed', state);
     return state;
   }));
+
+  ipcMain.handle('projectHead:list', wrap(async (projectId) => projectHead.sessions().filter((session) => !projectId || session.projectId === projectId)));
+  ipcMain.handle('projectHead:get', wrap(async (sessionId) => projectHead.get(sessionId)));
+  ipcMain.handle('projectHead:create', wrap(async (request) => projectHead.create(request)));
+  ipcMain.handle('projectHead:start', wrap(async (sessionId) => projectHead.start(sessionId)));
+  ipcMain.handle('projectHead:approvePlan', wrap(async (sessionId) => projectHead.approvePlan(sessionId)));
+  ipcMain.handle('projectHead:approveTask', wrap(async (sessionId, taskId) => projectHead.approveTask(sessionId, taskId)));
+  ipcMain.handle('projectHead:sendMessage', wrap(async (sessionId, content) => projectHead.sendMessage(sessionId, content)));
+  ipcMain.handle('projectHead:pause', wrap(async (sessionId) => projectHead.pause(sessionId)));
+  ipcMain.handle('projectHead:resume', wrap(async (sessionId) => projectHead.resume(sessionId)));
+  ipcMain.handle('projectHead:stop', wrap(async (sessionId) => projectHead.stop(sessionId)));
+  ipcMain.handle('projectHead:retryTask', wrap(async (sessionId, taskId) => projectHead.retryTask(sessionId, taskId)));
+  ipcMain.handle('projectHead:skipTask', wrap(async (sessionId, taskId) => projectHead.skipTask(sessionId, taskId)));
+  ipcMain.handle('projectHead:reassignTask', wrap(async (sessionId, taskId, provider, model) => projectHead.reassignTask(sessionId, taskId, provider, model)));
+  ipcMain.handle('projectHead:reviewEdits', wrap(async (sessionId, decision) => projectHead.reviewEdits(sessionId, decision)));
 
   ipcMain.handle('context:list', wrap(async (projectId) => contexts.list(projectId)));
   ipcMain.handle('context:get-or-create', wrap(async (projectId) => {
@@ -273,26 +322,7 @@ function registerIpc() {
     return result;
   }));
   ipcMain.handle('tools:run-safe-command', wrap(async (projectId, raw) => {
-    const project = getProject(projectId);
-    const command = String(raw || '').trim();
-    const allowed = new Map([
-      ['git status', ['git', ['status', '--short', '--branch']]],
-      ['git diff', ['git', ['diff', '--stat']]],
-      ['npm test', ['npm', ['test']]],
-      ['npm run build', ['npm', ['run', 'build']]],
-      ['npm run lint', ['npm', ['run', 'lint']]]
-    ]);
-    if (!allowed.has(command)) throw new Error('Command blocked. Allowed: git status, git diff, npm test, npm run build, npm run lint.');
-    let [exe, args] = allowed.get(command);
-    if (exe === 'npm') exe = await npmExecutable();
-    else exe = await executableExists(exe);
-    if (!exe) throw new Error('Required executable was not found.');
-    emit('terminal-output', { projectId, text: `> ${command}\n` });
-    return runProcess(exe, args, {
-      cwd: project.path,
-      onStdout: (text) => emit('terminal-output', { projectId, text }),
-      onStderr: (text) => emit('terminal-output', { projectId, text })
-    });
+    return runProjectCommand(projectId, raw, 'safe-auto');
   }));
 
   ipcMain.handle('preview:start', wrap(async (projectId) => {
@@ -382,6 +412,7 @@ function registerIpc() {
       providers: state.providers,
       projects: state.projects.map((p) => ({ ...p, path: '[local path redacted]' })),
       recentRuns: state.runs.slice(0, 20).map((r) => ({ id: r.id, status: r.status, provider: r.provider, startedAt: r.startedAt, completedAt: r.completedAt, error: r.error })),
+      projectHeadSessions: (state.projectHeadSessions || []).slice(0, 20).map((session) => ({ id: session.id, projectId: session.projectId, phase: session.phase, headProvider: session.headProvider, headModel: session.headModel, progress: session.progress, createdAt: session.createdAt, completedAt: session.completedAt })),
       events: store.readEvents(200).map((e) => ({ ...e, message: String(e.message || '').replace(/sk-[A-Za-z0-9_-]{8,}/g, '[REDACTED]') }))
     };
     fs.writeFileSync(result.filePath, JSON.stringify(sanitized, null, 2), 'utf8');
@@ -394,6 +425,7 @@ app.whenReady().then(() => {
   providers = new ProviderManager({ store, safeStorage, userData: app.getPath('userData'), emit });
   contexts = new SharedContextManager(app.getPath('userData'));
   orchestrator = new Orchestrator({ store, providers, contexts, emit, userData: app.getPath('userData') });
+  projectHead = createProjectHeadManager();
   registerIpc();
   createWindow();
   mainWindow.webContents.on('render-process-gone', (_event, details) => {

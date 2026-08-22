@@ -54,12 +54,16 @@ const {
 const { OX_ALPHA_MODEL, TOKENIN_MODELS, TOKENIN_GPT_MODEL_ID } = require('../src/lib/model-registry.cjs');
 const { SharedContextManager } = require('../src/lib/shared-context.cjs');
 const { atomicWriteFileSync, replaceFileSync } = require('../src/lib/atomic-file.cjs');
+const { ProjectHeadManager, SESSION_PHASES, TRANSITIONS } = require('../src/lib/project-head.cjs');
+const { normalizeTaskGraph, safeParallelBatch, taskProgress } = require('../src/lib/task-graph.cjs');
+const { commandDecision } = require('../src/lib/command-policy.cjs');
+const { PROJECT_HEAD_SYSTEM_PROMPT, PROJECT_HEAD_PLAN_SCHEMA } = require('../src/lib/project-head-prompt.cjs');
 
 async function main() {
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'noor-ai-tests-'));
 try {
   const store = new LocalStore(path.join(temp, 'state'));
-  assert.equal(store.getState().schemaVersion, 1);
+  assert.equal(store.getState().schemaVersion, 2);
   store.mutate((s) => { s.settings.ownerLabel = 'Noor'; });
   assert.equal(new LocalStore(path.join(temp, 'state')).getState().settings.ownerLabel, 'Noor');
   assert.equal(store.getState().providers.retired, undefined);
@@ -72,6 +76,81 @@ try {
   assert.equal(store.getState().providers.tokenin.model, 'myt/gpt-5.6-sol-free');
   assert.equal(store.getState().providers.tokenin.models[0].outputTokenLimit, 4096);
   assert.equal(store.getState().providers.tokenin.models[1].requestsPerMinute, 2);
+  assert.deepEqual(store.getState().projectHeadSessions, []);
+  assert.ok(store.getState().agentTemplates.some((template) => template.id === 'planner'));
+  assert.equal(store.getState().settings.projectHead.approvalMode, 'safe-auto');
+
+  const v1StateDir = path.join(temp, 'schema-v1-state');
+  fs.mkdirSync(v1StateDir, { recursive: true });
+  const v1State = store.defaults();
+  v1State.schemaVersion = 1;
+  v1State.projects = [{ id: 'preserved-v1-project', name: 'Preserved', path: temp }];
+  delete v1State.projectHeadSessions;
+  delete v1State.agentTemplates;
+  delete v1State.settings.projectHead;
+  fs.writeFileSync(path.join(v1StateDir, 'state.json'), JSON.stringify(v1State), 'utf8');
+  const migratedV1 = new LocalStore(v1StateDir).getState();
+  assert.equal(migratedV1.schemaVersion, 2);
+  assert.equal(migratedV1.projects[0].id, 'preserved-v1-project');
+  assert.deepEqual(migratedV1.projectHeadSessions, []);
+  assert.ok(migratedV1.agentTemplates.length >= 5);
+
+  const graph = normalizeTaskGraph([
+    { id: 'ui', title: 'UI', role: 'Frontend', writeScopes: ['renderer/**/*'] },
+    { id: 'tests', title: 'Tests', role: 'QA', writeScopes: ['tests/**/*'] },
+    { id: 'review', title: 'Review', role: 'Reviewer', dependsOn: ['ui', 'tests'], writeScopes: [] }
+  ]);
+  assert.deepEqual(safeParallelBatch(graph, 3).map((task) => task.id), ['ui', 'tests']);
+  assert.equal(taskProgress(graph).percent, 0);
+  assert.throws(() => normalizeTaskGraph([{ id: 'a', dependsOn: ['b'] }, { id: 'b', dependsOn: ['a'] }]), /circular dependency/);
+  assert.equal(commandDecision('git status', 'read-only').allowed, true);
+  assert.equal(commandDecision('npm run build', 'read-only').allowed, false);
+  assert.equal(commandDecision('rm -rf .', 'autonomous-local').allowed, false);
+  assert.match(PROJECT_HEAD_SYSTEM_PROMPT, /persistent local AI development command center/);
+  assert.ok(PROJECT_HEAD_PLAN_SCHEMA.required.includes('tasks'));
+  assert.ok(SESSION_PHASES.includes('awaiting-edit-review'));
+  assert.ok(TRANSITIONS['awaiting-plan-approval'].includes('executing'));
+
+  const headProjectDir = path.join(temp, 'head-project');
+  fs.mkdirSync(headProjectDir, { recursive: true });
+  fs.writeFileSync(path.join(headProjectDir, 'existing.txt'), 'baseline', 'utf8');
+  const headStore = new LocalStore(path.join(temp, 'head-state'));
+  headStore.mutate((state) => {
+    state.projects = [{ id: 'head-project', name: 'Head Project', path: headProjectDir, goal: '', createdAt: new Date().toISOString(), lastActivity: new Date().toISOString() }];
+    state.providers.codex = { ...state.providers.codex, installed: true, connected: true, model: 'codex-test' };
+  });
+  const headProviders = { run: async () => ({ json: { summary: 'Implement then verify.', assumptions: [], risks: [], tasks: [
+    { id: 'implement', title: 'Implement', description: 'Create the feature.', role: 'Builder', priority: 1, dependsOn: [], writeScopes: ['feature.txt'], acceptanceCriteria: ['Feature file exists.'] },
+    { id: 'verify', title: 'Verify', description: 'Review the feature.', role: 'QA', priority: 2, dependsOn: ['implement'], writeScopes: ['tests/**/*'], acceptanceCriteria: ['Evidence is recorded.'] }
+  ] } }) };
+  let headRunCount = 0;
+  const headRuns = new Map();
+  const headOrchestrator = {
+    run: async (request) => {
+      headRunCount += 1;
+      fs.writeFileSync(path.join(headProjectDir, headRunCount === 1 ? 'feature.txt' : 'verification.txt'), `run ${headRunCount}`, 'utf8');
+      const run = { id: `head-run-${headRunCount}`, contextId: 'head-context', executionStatus: 'completed', review: { status: 'pending' }, agents: request.plan.roles.map((role) => ({ role: role.role, status: 'completed', summary: 'done', files: [headRunCount === 1 ? 'feature.txt' : 'verification.txt'], provider: 'codex', model: 'codex-test' })) };
+      headRuns.set(run.id, run);
+      return run;
+    },
+    reviewRun: (runId) => ({ ...headRuns.get(runId), review: { status: 'accepted' } }),
+    cancel: () => true
+  };
+  const headManager = new ProjectHeadManager({ store: headStore, providers: headProviders, orchestrator: headOrchestrator, contexts: {}, emit: () => {}, userData: headStore.baseDir, autoExecute: false });
+  const headSession = headManager.create({ projectId: 'head-project', brief: 'Build and verify the feature.', headProvider: 'codex', approvalMode: 'safe-auto', maximumAgents: 2 });
+  assert.equal(headSession.phase, 'created');
+  const plannedHead = await headManager.start(headSession.id);
+  assert.equal(plannedHead.phase, 'awaiting-plan-approval');
+  assert.deepEqual(plannedHead.tasks.map((task) => task.id), ['implement', 'verify']);
+  assert.throws(() => headManager.transition(headSession.id, 'completed'), /cannot move/);
+  headManager.approvePlan(headSession.id);
+  const executedHead = await headManager.execute(headSession.id);
+  assert.equal(executedHead.phase, 'awaiting-edit-review');
+  assert.equal(executedHead.progress.percent, 100);
+  assert.ok(executedHead.changedFiles.some((change) => change.path === 'feature.txt'));
+  const acceptedHead = headManager.reviewEdits(headSession.id, 'accept');
+  assert.equal(acceptedHead.phase, 'completed');
+  assert.equal(fs.existsSync(headManager.checkpoints.pathFor(headSession.id)), false);
 
   const legacyStateDir = path.join(temp, 'legacy-openrouter-state');
   fs.mkdirSync(legacyStateDir, { recursive: true });
@@ -933,6 +1012,19 @@ try {
   assert.match(rendererSource, /parseProviderChoice/);
   assert.match(rendererSource, /tokenInConnect/);
   assert.match(rendererSource, /automaticProviderIds\.length/);
+  assert.match(rendererSource, /Project Head command center/);
+  assert.match(rendererSource, /Command Center/);
+  assert.match(rendererSource, /Agent Templates/);
+  assert.match(rendererSource, /data-head-action="approve-plan"/);
+  assert.match(rendererSource, /Accept mission edits/);
+  assert.match(rendererSource, /Reject & restore baseline/);
+  assert.match(rendererSource, /data-head-reassign/);
+  assert.match(rendererSource, /onProjectHeadUpdated/);
+
+  const preloadSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'preload.cjs'), 'utf8');
+  assert.match(preloadSource, /projectHead:/);
+  assert.match(preloadSource, /projectHead:reviewEdits/);
+  assert.doesNotMatch(preloadSource, /safeStorage|secrets\.json/);
 
   const resetDir = path.join(temp, 'reset-state');
   const resetStore = new LocalStore(resetDir);

@@ -1,9 +1,15 @@
-# Noor AI Studio 0.2.4
+# Noor AI Studio 0.3.0
 
-> **v0.2.4 runtime note:** Startup and local packaging are npm-free. The launcher downloads and SHA-256-verifies the official Electron Windows runtime directly, then builds a portable app without `node_modules` or `electron-builder`.
+> **v0.3.0 runtime note:** Startup and local packaging remain npm-free. The launcher downloads and SHA-256-verifies the official Electron Windows runtime directly, then builds a portable app without `node_modules` or `electron-builder`.
 
 
-A local desktop AI development workspace where OpenAI Codex, Gemini, Ollama, Ox Alpha, and TokenIn models can participate in one project-scoped conversation and in the same specialist-agent workflow.
+A local desktop AI development command center where a persistent **Project Head** inspects a project, creates a dependency-aware task graph, delegates connected OpenAI Codex, Gemini, Ollama, Ox Alpha, and TokenIn specialists, validates evidence, and keeps every edit reversible until final review.
+
+## Project Head command center
+
+Opening a project now lands in **Command Center**. Choose a connected provider/model as Project Head, describe the finished outcome, add constraints and acceptance criteria, then select one of four approval modes: Supervised, Safe Auto, Autonomous Local, or Read Only. The mission survives restarts and records its plan, tasks, decisions, approvals, validation evidence, messages, checkpoints, and final report.
+
+The project navigation is now Command Center, Plan, Agents, Files, Terminal, Preview, Validation, History, and Council. Council preserves the project Shared Room; legacy Agent Runs remain readable from Command Center and project History.
 
 ## What changed
 

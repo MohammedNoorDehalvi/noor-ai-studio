@@ -9,7 +9,7 @@ $ProgressPreference = 'Continue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 $Root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
-$Version = '0.2.4'
+$Version = '0.3.0'
 $ElectronVersion = '43.4.1'
 $ElectronArchiveName = "electron-v$ElectronVersion-win32-x64.zip"
 $ElectronReleaseBase = "https://github.com/electron/electron/releases/download/v$ElectronVersion"

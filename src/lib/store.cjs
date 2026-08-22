@@ -24,7 +24,7 @@ class LocalStore {
 
   defaults() {
     return {
-      schemaVersion: 1,
+      schemaVersion: 2,
       onboardingComplete: false,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
@@ -38,6 +38,14 @@ class LocalStore {
       },
       projects: [],
       runs: [],
+      projectHeadSessions: [],
+      agentTemplates: [
+        { id: 'planner', name: 'Planner', purpose: 'Inspect the project and turn the mission into an executable plan.', writeScopes: [] },
+        { id: 'builder', name: 'Builder', purpose: 'Implement a bounded project task and validate the result.', writeScopes: ['**/*'] },
+        { id: 'debugger', name: 'Debugger', purpose: 'Find root causes and implement focused fixes.', writeScopes: ['**/*'] },
+        { id: 'qa', name: 'QA', purpose: 'Add tests and verify acceptance criteria with evidence.', writeScopes: ['tests/**/*', '**/*.test.*', '**/*.spec.*'] },
+        { id: 'reviewer', name: 'Reviewer', purpose: 'Review the final change set and surface remaining risks.', writeScopes: [] }
+      ],
       settings: {
         theme: 'dark',
         maxAgents: 4,
@@ -45,7 +53,9 @@ class LocalStore {
         approvalMode: 'safe-auto',
         ownerLabel: 'Noor',
         sharedContextRounds: 1,
-        defaultParticipants: [...AUTOMATIC_PROVIDER_IDS]
+        defaultParticipants: [...AUTOMATIC_PROVIDER_IDS],
+        projectHead: { approvalMode: 'safe-auto', executionPreference: 'sequential', maximumIterations: 2 },
+        appearance: { theme: 'dark', density: 'comfortable', reducedMotion: false }
       }
     };
   }
@@ -56,6 +66,7 @@ class LocalStore {
     const normalized = {
       ...defaults,
       ...migrated,
+      schemaVersion: 2,
       providers: {
         codex: { ...defaults.providers.codex, ...(migrated.providers?.codex || {}) },
         gemini: { ...defaults.providers.gemini, ...(migrated.providers?.gemini || {}) },
@@ -73,6 +84,8 @@ class LocalStore {
         antigravity: { ...defaults.providers.antigravity, ...(migrated.providers?.antigravity || {}) }
       },
       projects: Array.isArray(migrated.projects) ? migrated.projects : [],
+      projectHeadSessions: Array.isArray(migrated.projectHeadSessions) ? migrated.projectHeadSessions : [],
+      agentTemplates: Array.isArray(migrated.agentTemplates) && migrated.agentTemplates.length ? migrated.agentTemplates : defaults.agentTemplates,
       runs: (Array.isArray(migrated.runs) ? migrated.runs : []).map((run) => {
         const agents = Array.isArray(run.agents) ? run.agents.filter((agent) => AUTOMATIC_PROVIDER_IDS.includes(agent?.provider)) : [];
         const agentIds = new Set(agents.map((agent) => agent.id));
@@ -88,6 +101,8 @@ class LocalStore {
       settings: {
         ...defaults.settings,
         ...(migrated.settings || {}),
+        projectHead: { ...defaults.settings.projectHead, ...(migrated.settings?.projectHead || {}) },
+        appearance: { ...defaults.settings.appearance, ...(migrated.settings?.appearance || {}) },
         defaultProvider: AUTOMATIC_PROVIDER_IDS.includes(migrated.settings?.defaultProvider) ? migrated.settings.defaultProvider : defaults.settings.defaultProvider,
         defaultParticipants: (Array.isArray(migrated.settings?.defaultParticipants) ? migrated.settings.defaultParticipants : defaults.settings.defaultParticipants)
           .filter((id) => AUTOMATIC_PROVIDER_IDS.includes(id))
@@ -104,7 +119,7 @@ class LocalStore {
     }
     try {
       const parsed = JSON.parse(fs.readFileSync(this.stateFile, 'utf8'));
-      if (parsed.schemaVersion !== 1) throw new Error('Unsupported schema version');
+      if (![1, 2].includes(parsed.schemaVersion)) throw new Error('Unsupported schema version');
       fs.copyFileSync(this.stateFile, this.backupFile);
       const normalized = this.normalizeState(parsed);
       if (JSON.stringify(normalized) !== JSON.stringify(parsed)) return this.writeState(normalized);

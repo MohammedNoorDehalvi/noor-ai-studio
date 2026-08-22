@@ -56,6 +56,22 @@ contextBridge.exposeInMainWorld('noor', {
     reviewEdits: (runId, decision) => invoke('orchestrator:review-edits', runId, decision),
     deleteRun: (runId) => invoke('orchestrator:delete-run', runId)
   },
+  projectHead: {
+    list: (projectId) => invoke('projectHead:list', projectId),
+    get: (sessionId) => invoke('projectHead:get', sessionId),
+    create: (request) => invoke('projectHead:create', request),
+    start: (sessionId) => invoke('projectHead:start', sessionId),
+    approvePlan: (sessionId) => invoke('projectHead:approvePlan', sessionId),
+    approveTask: (sessionId, taskId) => invoke('projectHead:approveTask', sessionId, taskId),
+    sendMessage: (sessionId, content) => invoke('projectHead:sendMessage', sessionId, content),
+    pause: (sessionId) => invoke('projectHead:pause', sessionId),
+    resume: (sessionId) => invoke('projectHead:resume', sessionId),
+    stop: (sessionId) => invoke('projectHead:stop', sessionId),
+    retryTask: (sessionId, taskId) => invoke('projectHead:retryTask', sessionId, taskId),
+    skipTask: (sessionId, taskId) => invoke('projectHead:skipTask', sessionId, taskId),
+    reassignTask: (sessionId, taskId, provider, model) => invoke('projectHead:reassignTask', sessionId, taskId, provider, model),
+    reviewEdits: (sessionId, decision) => invoke('projectHead:reviewEdits', sessionId, decision)
+  },
   contexts: {
     list: (projectId) => invoke('context:list', projectId),
     getOrCreate: (projectId) => invoke('context:get-or-create', projectId),
@@ -82,6 +98,8 @@ contextBridge.exposeInMainWorld('noor', {
     onProviderProgress: (cb) => on('provider-progress', cb),
     onTerminal: (cb) => on('terminal-output', cb),
     onContextMessage: (cb) => on('context-message', cb),
-    onContextProgress: (cb) => on('context-progress', cb)
+    onContextProgress: (cb) => on('context-progress', cb),
+    onProjectHeadUpdated: (cb) => on('project-head-updated', cb),
+    onProjectHeadEvent: (cb) => on('project-head-event', cb)
   }
 });

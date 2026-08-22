@@ -1,4 +1,4 @@
-NOOR AI STUDIO v0.2.4 — READ THIS FIRST
+NOOR AI STUDIO v0.3.0 — READ THIS FIRST
 
 This version no longer runs npm install and does not create node_modules.
 The launcher downloads the official Electron Windows runtime directly from

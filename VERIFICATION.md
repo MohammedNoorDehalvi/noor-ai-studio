@@ -1,4 +1,4 @@
-# Verification — v0.2.4
+# Verification — v0.3.0
 
 The source test suite covers local persistence, Windows atomic-file retries,
 path traversal protection, project files, agent planning, provider assignment,
