@@ -83,11 +83,20 @@ function scopesOverlap(left = [], right = []) {
   const broad = (value) => !value || value === '*' || value === '**/*' || value === '**';
   for (const a of left) for (const b of right) {
     if (broad(a) || broad(b)) return true;
-    const normalizedA = a.replace(/\\/g, '/');
-    const normalizedB = b.replace(/\\/g, '/');
+    // Collapse one-or-more backslashes to a single forward slash, so both a lone
+    // Windows separator ("src\\lib") and a doubled/escaped one ("src\\\\lib", as can
+    // arrive from a JSON round-trip) normalize the same way as "src/lib".
+    const normalizedA = a.replace(/\\\\+/g, '/');
+    const normalizedB = b.replace(/\\\\+/g, '/');
     if (normalizedA === normalizedB) return true;
-    const cleanA = a.replace(/\*.*$/, '').replace(/\/$/, '');
-    const cleanB = b.replace(/\*.*$/, '').replace(/\/$/, '');
+    // Derive the "clean" prefix from the already-normalized (forward-slash) form so that
+    // Windows-style scopes (e.g. "src\\lib\\**") compare correctly against POSIX-style
+    // scopes (e.g. "src/lib/store.cjs"). Computing this from the raw, un-normalized value
+    // previously left backslashes in place and caused false negatives on Windows, which
+    // is this app's primary target platform — letting two parallel tasks believe their
+    // write scopes didn't overlap when they actually did.
+    const cleanA = normalizedA.replace(/\*.*$/, '').replace(/\/$/, '');
+    const cleanB = normalizedB.replace(/\*.*$/, '').replace(/\/$/, '');
     if (cleanA === cleanB || cleanA.startsWith(`${cleanB}/`) || cleanB.startsWith(`${cleanA}/`)) return true;
   }
   return false;
