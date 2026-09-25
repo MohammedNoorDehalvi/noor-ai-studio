@@ -144,7 +144,13 @@ class ProjectHeadManager {
       validation: [], changedFiles: [], finalReport: null, progress: { total: 0, completed: 0, failed: 0, running: 0, percent: 0 },
       createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), completedAt: null
     };
-    const checkpoint = this.checkpoints.create(session.id, project);
+    let checkpoint;
+    try {
+      checkpoint = this.checkpoints.create(session.id, project);
+    } catch (error) {
+      this.log?.(session.id, 'error', `Mission baseline could not be created: ${error.message}`);
+      throw error;
+    }
     session.checkpoints.push({ ...checkpoint, kind: 'mission-baseline' });
     this.store.mutate((next) => {
       next.projectHeadSessions = [session, ...(next.projectHeadSessions || [])].slice(0, 100);
@@ -177,7 +183,8 @@ class ProjectHeadManager {
         plan = fallbackPlan(planning.brief, planning.maximumAgents);
         this.log(id, 'warning', `Project Head planning response was unavailable; Noor created a safe sequential recovery plan. ${error.message}`);
       }
-      const tasks = normalizeTaskGraph((plan.tasks || []).slice(0, Math.max(2, planning.maximumAgents * 2)));
+      const rawTasks = Array.isArray(plan.tasks) ? plan.tasks : [];
+      const tasks = normalizeTaskGraph(rawTasks.slice(0, Math.max(2, planning.maximumAgents * 2)));
       if (!tasks.length) throw new Error('Project Head produced an empty task graph.');
       this.update(id, (target) => {
         target.plan = { summary: String(plan.summary || ''), assumptions: (plan.assumptions || []).map(String), risks: (plan.risks || []).map(String), createdAt: new Date().toISOString() };
