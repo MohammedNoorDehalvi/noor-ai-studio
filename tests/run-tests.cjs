@@ -55,7 +55,7 @@ const { OX_ALPHA_MODEL, TOKENIN_MODELS, TOKENIN_GPT_MODEL_ID } = require('../src
 const { SharedContextManager } = require('../src/lib/shared-context.cjs');
 const { atomicWriteFileSync, replaceFileSync } = require('../src/lib/atomic-file.cjs');
 const { ProjectHeadManager, SESSION_PHASES, TRANSITIONS } = require('../src/lib/project-head.cjs');
-const { normalizeTaskGraph, safeParallelBatch, taskProgress } = require('../src/lib/task-graph.cjs');
+const { normalizeTaskGraph, safeParallelBatch, scopesOverlap, taskProgress } = require('../src/lib/task-graph.cjs');
 const { commandDecision } = require('../src/lib/command-policy.cjs');
 const { PROJECT_HEAD_SYSTEM_PROMPT, PROJECT_HEAD_PLAN_SCHEMA } = require('../src/lib/project-head-prompt.cjs');
 
