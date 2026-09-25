@@ -6,6 +6,7 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:; connect-src 'none'; font-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
   <title>Noor AI Studio</title>
   <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="command-palette.css" />
 </head>
 <body>
   <div id="app" class="app-shell">
@@ -28,6 +29,7 @@
           <div class="title-row"><h1 id="page-title">Home</h1><span id="scope-label" class="scope-label">Application</span></div>
           <p id="page-subtitle">Loading your workspace…</p>
         </div>
+        <button class="button command-palette-trigger" type="button" data-command-palette-open aria-keyshortcuts="Control+K Meta+K" aria-label="Open command palette">Search commands <kbd>Ctrl K</kbd></button>
         <div id="top-actions" class="top-actions"></div>
       </header>
       <nav id="project-nav" class="project-nav" aria-label="Project areas" hidden></nav>
@@ -39,5 +41,6 @@
   <div id="toast-root" class="toast-root" aria-live="polite" aria-atomic="true"></div>
   <div id="modal-root"></div>
   <script src="app.js"></script>
+  <script src="command-palette.js"></script>
 </body>
 </html>
