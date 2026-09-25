@@ -33,7 +33,15 @@ function normalizeTaskGraph(rawTasks = []) {
   const ids = new Set(tasks.map((task) => task.id));
   if (ids.size !== tasks.length) throw new Error('Project Head plan contains duplicate task identifiers.');
   for (const task of tasks) {
-    task.dependsOn = task.dependsOn.filter((id) => id !== task.id && ids.has(id));
+    // Self-dependencies and unknown dependencies are invalid plan data. Silently
+    // dropping them can turn a malformed AI plan into a different executable plan.
+    if (task.dependsOn.includes(task.id)) {
+      throw new Error(`Project Head task "${task.id}" cannot depend on itself.`);
+    }
+    const unknown = task.dependsOn.find((id) => !ids.has(id));
+    if (unknown) {
+      throw new Error(`Project Head task "${task.id}" depends on unknown task "${unknown}".`);
+    }
   }
   assertAcyclic(tasks);
   return refreshTaskReadiness(tasks);
@@ -75,6 +83,9 @@ function scopesOverlap(left = [], right = []) {
   const broad = (value) => !value || value === '*' || value === '**/*' || value === '**';
   for (const a of left) for (const b of right) {
     if (broad(a) || broad(b)) return true;
+    const normalizedA = a.replace(/\\/g, '/');
+    const normalizedB = b.replace(/\\/g, '/');
+    if (normalizedA === normalizedB) return true;
     const cleanA = a.replace(/\*.*$/, '').replace(/\/$/, '');
     const cleanB = b.replace(/\*.*$/, '').replace(/\/$/, '');
     if (cleanA === cleanB || cleanA.startsWith(`${cleanB}/`) || cleanB.startsWith(`${cleanA}/`)) return true;
