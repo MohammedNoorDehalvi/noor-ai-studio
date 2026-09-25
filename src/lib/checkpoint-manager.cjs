@@ -8,7 +8,11 @@ class CheckpointManager {
     fs.mkdirSync(this.dir, { recursive: true });
   }
 
-  pathFor(sessionId) { return path.join(this.dir, `${sessionId}.noorbackup`); }
+  pathFor(sessionId) { return path.join(this.dir, `${String(sessionId).replace(/[^a-zA-Z0-9_-]/g, '_')}.noorbackup`); }
+
+  async cleanup(sessionId) {
+    try { fs.rmSync(this.pathFor(sessionId), { force: true }); } catch {}
+  }
 
   create(sessionId, project) {
     const target = this.pathFor(sessionId);
