@@ -106,6 +106,16 @@ try {
   assert.equal(commandDecision('git status', 'read-only').allowed, true);
   assert.equal(commandDecision('npm run build', 'read-only').allowed, false);
   assert.equal(commandDecision('rm -rf .', 'autonomous-local').allowed, false);
+
+  assert.throws(
+    () => normalizeTaskGraph([{ id: 'a', dependsOn: ['missing'] }]),
+    /depends on unknown task/
+  );
+  assert.throws(
+    () => normalizeTaskGraph([{ id: 'same', dependsOn: ['same'] }]),
+    /cannot depend on itself/
+  );
+  assert.equal(scopesOverlap(['src\\\\lib\\\\**'], ['src/lib/store.cjs']), true);
   assert.match(PROJECT_HEAD_SYSTEM_PROMPT, /persistent local AI development command center/);
   assert.ok(PROJECT_HEAD_PLAN_SCHEMA.required.includes('tasks'));
   assert.ok(SESSION_PHASES.includes('awaiting-edit-review'));
