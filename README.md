@@ -120,6 +120,10 @@ The index is written atomically. Messages are append-only NDJSON records with pr
 - Gemini, OpenRouter, and TokenIn keys are encrypted using Electron `safeStorage` and excluded from diagnostics/backups.
 - Codex credentials remain owned by the official Codex runtime.
 
+## Reliability notes
+
+Project Head treats the AI-generated task graph as untrusted input: duplicate, missing, self-referential, or cyclic dependencies are rejected before execution. Parallel tasks are only selected when their normalized write scopes do not overlap. Every mission starts with a local baseline checkpoint and file edits remain reviewable until explicitly accepted or rejected.
+
 ## Known limits
 
 Read `docs/DEVIATIONS.md`. The largest architectural differences remain Electron instead of Tauri, vanilla JavaScript instead of React/TypeScript, and sequential agents rather than parallel Git worktrees. The cross-provider context is real, but it is orchestrator-mediated: providers read a synchronized transcript rather than opening direct network connections to one another.
