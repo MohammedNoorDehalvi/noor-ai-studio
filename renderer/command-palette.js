@@ -13,6 +13,9 @@
     { id: 'settings', group: 'Navigate', title: 'Go to Settings', hint: 'Application and Project Head preferences', icon: 'S', action: () => clickRoute('settings') },
   ];
 
+  const RECENT_STORAGE_KEY = 'noor-ai-studio.command-palette.recent';
+  const MAX_RECENT_COMMANDS = 6;
+
   let root = null;
   let input = null;
   let list = null;
@@ -44,6 +47,57 @@
     return String(value || '').toLowerCase().trim();
   }
 
+  function recentStorage() {
+    try {
+      return typeof window !== 'undefined' ? window.localStorage : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function loadRecentCommandIds(storage = recentStorage()) {
+    if (!storage) return [];
+    try {
+      const value = JSON.parse(storage.getItem(RECENT_STORAGE_KEY) || '[]');
+      if (!Array.isArray(value)) return [];
+      return value.filter((id) => typeof id === 'string' && id).slice(0, MAX_RECENT_COMMANDS);
+    } catch {
+      return [];
+    }
+  }
+
+  function saveRecentCommandIds(ids, storage = recentStorage()) {
+    if (!storage) return;
+    try {
+      storage.setItem(RECENT_STORAGE_KEY, JSON.stringify(ids.slice(0, MAX_RECENT_COMMANDS)));
+    } catch {
+      // Local storage can be unavailable in restricted renderer sessions.
+    }
+  }
+
+  function recordRecentCommand(id, storage = recentStorage()) {
+    if (!id) return;
+    const ids = loadRecentCommandIds(storage).filter((item) => item !== id);
+    saveRecentCommandIds([id, ...ids], storage);
+  }
+
+  function clearRecentCommandIds(storage = recentStorage()) {
+    if (!storage) return;
+    try {
+      storage.removeItem(RECENT_STORAGE_KEY);
+    } catch {
+      // Ignore storage cleanup failures; the palette remains usable.
+    }
+  }
+
+  function recentCommands(storage = recentStorage()) {
+    const byId = new Map(allCommands().map((command) => [command.id, command]));
+    return loadRecentCommandIds(storage)
+      .map((id) => byId.get(id))
+      .filter(Boolean)
+      .map((command) => ({ ...command, group: 'Recent' }));
+  }
+
   function score(command, query) {
     if (!query) return 1;
     const haystack = normalized([command.title, command.hint, command.keywords].filter(Boolean).join(' '));
@@ -56,12 +110,20 @@
     return rank;
   }
 
-  function filterCommands(query) {
+  function filterCommands(query, storage = recentStorage()) {
+    const normalizedQuery = normalized(query);
     const scored = allCommands()
-      .map((command, order) => ({ command, order, score: score(command, normalized(query)) }))
+      .map((command, order) => ({ command, order, score: score(command, normalizedQuery) }))
       .filter((item) => item.score > 0)
       .sort((a, b) => b.score - a.score || a.order - b.order);
-    return scored.map((item) => item.command);
+    if (normalizedQuery) return scored.map((item) => item.command);
+
+    const recent = recentCommands(storage);
+    const recentIds = new Set(recent.map((command) => command.id));
+    return [
+      ...recent,
+      ...scored.filter((item) => !recentIds.has(item.command.id)).map((item) => item.command)
+    ];
   }
 
   function buildShell() {
@@ -88,6 +150,7 @@
           <span><kbd>↑</kbd><kbd>↓</kbd> Navigate</span>
           <span><kbd>Enter</kbd> Open</span>
           <span><kbd>Esc</kbd> Close</span>
+          <button class="command-palette-clear" type="button" data-command-palette-clear-recent hidden>Clear recent</button>
           <span class="command-palette-footer-spacer"></span>
           <span class="command-palette-context" id="command-palette-context"></span>
         </footer>
@@ -144,6 +207,9 @@
     }
 
     const context = root.querySelector('#command-palette-context');
+    const clearRecent = root.querySelector('[data-command-palette-clear-recent]');
+    const showingRecents = !normalized(input?.value || '') && visibleCommands.some((command) => command.group === 'Recent');
+    if (clearRecent) clearRecent.hidden = !showingRecents;
     const project = typeof currentProject === 'function' ? currentProject() : null;
     context.textContent = project ? `Current project: ${project.name}` : 'No project selected';
   }
@@ -169,6 +235,7 @@
   function execute(index = activeIndex) {
     const command = visibleCommands[index];
     if (!command) return;
+    recordRecentCommand(command.id);
     close();
     Promise.resolve(command.action()).catch((error) => {
       console.error(error);
@@ -179,6 +246,14 @@
   function handleClick(event) {
     const closeButton = event.target.closest('[data-command-palette-close]');
     if (closeButton) return close();
+    const clearRecent = event.target.closest('[data-command-palette-clear-recent]');
+    if (clearRecent) {
+      clearRecentCommandIds();
+      activeIndex = 0;
+      renderResults();
+      input?.focus();
+      return;
+    }
     const item = event.target.closest('[data-command-index]');
     if (!item) return;
     activeIndex = Number(item.dataset.commandIndex) || 0;
@@ -216,7 +291,8 @@
   }
 
   function clickRoute(route) {
-    const button = document.querySelector(`#nav [data-route="${route}"]`);
+    if (typeof window.noorNavigate === 'function') return window.noorNavigate(route);
+    const button = document.querySelector(`#nav [data-route="${route}"]`) || document.querySelector(`[data-route="${route}"]`);
     if (!button) throw new Error(`Unable to open ${route}.`);
     button.click();
   }
@@ -275,5 +351,14 @@
   }
 
   if (typeof document !== 'undefined' && typeof window !== 'undefined') initDomBindings();
-  if (typeof module !== 'undefined' && module.exports) module.exports = { filterCommands, normalized, score };
+  if (typeof module !== 'undefined' && module.exports) module.exports = {
+    filterCommands,
+    normalized,
+    score,
+    loadRecentCommandIds,
+    recordRecentCommand,
+    clearRecentCommandIds,
+    RECENT_STORAGE_KEY,
+    MAX_RECENT_COMMANDS
+  };
 })();
