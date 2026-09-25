@@ -13,6 +13,9 @@ The project navigation is now Command Center, Plan, Agents, Files, Terminal, Pre
 
 ## What changed
 
+### Command Palette
+The command palette is keyboard-first and now remembers the six most recently used commands locally. Recent entries are project-aware, deduplicated, and can be cleared from the palette footer. Legacy Collaboration and Agent Runs destinations remain reachable through the palette even when the modern shell hides those routes from the primary navigation.
+
 ### Shared Room
 
 The new **Shared Room** stores one canonical local transcript per project. Noor and every selected provider append messages to the same NDJSON journal. Before responding, every selected provider receives:
